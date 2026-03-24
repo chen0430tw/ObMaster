@@ -34,18 +34,41 @@
 
 static inline DWORD64 DecodeRef(DWORD64 ref) { return ref & ~(DWORD64)0xF; }
 
+// Return the RVA range of a named PE section in the loaded module.
+// Returns false if section not found.
+static bool GetSectionRange(HMODULE hNt, const char* secName,
+                            DWORD64* outBase, DWORD64* outEnd)
+{
+    auto* dos = (IMAGE_DOS_HEADER*)hNt;
+    auto* nt  = (IMAGE_NT_HEADERS64*)((BYTE*)hNt + dos->e_lfanew);
+    IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
+        char name[9]{}; memcpy(name, sec->Name, 8);
+        if (_stricmp(name, secName) == 0) {
+            *outBase = sec->VirtualAddress;
+            *outEnd  = sec->VirtualAddress + sec->Misc.VirtualSize;
+            return true;
+        }
+    }
+    return false;
+}
+
 // Locate a Psp*NotifyRoutine array VA by scanning an exported function for
-// RIP-relative LEA instructions.  skipVA: skip any result equal to this kernel
-// VA (used when a function's first LEA hits a previously-found array).
+// RIP-relative LEA instructions.
+//   skipVA  : skip any kernel VA equal to this (previously found array)
+//   dataBase/dataEnd : only accept RVAs inside this range (from .data section)
 static DWORD64 FindArrayViaExport(HMODULE hNt, DWORD64 userBase, DWORD64 kernBase,
-                                  const char* exportFn, DWORD64 skipVA = 0,
-                                  int scanBytes = 512)
+                                  const char* exportFn,
+                                  DWORD64 skipVA   = 0,
+                                  DWORD64 dataBase = 0,
+                                  DWORD64 dataEnd  = 0,
+                                  int scanBytes    = 512)
 {
     BYTE* fn = (BYTE*)GetProcAddress(hNt, exportFn);
     if (!fn) return 0;
 
     for (int i = 0; i < scanBytes - 6; i++) {
-        // REX.W (48) or REX.WR (4C) prefix + LEA opcode (8D) + ModRM with mod=00 rm=101
+        // REX.W (48) or REX.WR (4C) + LEA (8D) + ModRM mod=00 rm=101
         if ((fn[i] == 0x48 || fn[i] == 0x4C) &&
              fn[i+1] == 0x8D &&
             (fn[i+2] & 0xC7) == 0x05)
@@ -54,7 +77,9 @@ static DWORD64 FindArrayViaExport(HMODULE hNt, DWORD64 userBase, DWORD64 kernBas
             DWORD64 userTgt = (DWORD64)(fn + i + 7) + (INT64)disp;
             DWORD64 rva     = userTgt - userBase;
             DWORD64 va      = kernBase + rva;
-            if (va == skipVA) continue;   // already found this one, keep scanning
+            if (va == skipVA) continue;
+            // If a .data range was provided, reject anything outside it
+            if (dataBase != dataEnd && !(rva >= dataBase && rva < dataEnd)) continue;
             return va;
         }
     }
@@ -137,18 +162,27 @@ void CmdNotify(bool doImage, bool doProcess, bool doThread) {
 
     struct { const char* label; const char* exportFn; bool enabled; DWORD64 arrayVA; } sections[] = {
         { "LoadImage",     "PsRemoveLoadImageNotifyRoutine",     doImage,   0 },
-        { "CreateProcess", "PsSetCreateProcessNotifyRoutineEx", doProcess, 0 },
+        { "CreateProcess", "PsSetCreateProcessNotifyRoutine",   doProcess, 0 },
         { "CreateThread",  "PsRemoveCreateThreadNotifyRoutine",  doThread,  0 },
     };
 
-    // Find LoadImage first; pass its VA as skipVA when scanning CreateProcess,
-    // because PsSetCreateProcessNotifyRoutineEx's first LEA may hit the same array.
+    // Restrict LEA results to the .data section to reject false positives.
+    DWORD64 dataBase = 0, dataEnd = 0;
+    GetSectionRange(hNt, ".data", &dataBase, &dataEnd);
+
+    // Resolve LoadImage first; pass its VA as skipVA for CreateProcess since
+    // PsSetCreateProcessNotifyRoutineEx's first LEA may land on the same array.
     for (auto& s : sections) {
         if (!s.enabled) continue;
-        DWORD64 skip = 0;
-        if (strcmp(s.exportFn, "PsSetCreateProcessNotifyRoutineEx") == 0)
-            skip = sections[0].arrayVA;   // sections[0] = LoadImage, already resolved
-        s.arrayVA = FindArrayViaExport(hNt, userBase, kernBase, s.exportFn, skip);
+        DWORD64 skip = (strcmp(s.exportFn, "PsSetCreateProcessNotifyRoutine") == 0)
+                       ? sections[0].arrayVA : 0;
+        s.arrayVA = FindArrayViaExport(hNt, userBase, kernBase, s.exportFn,
+                                       skip, dataBase, dataEnd);
+        // Fallback for CreateProcess
+        if (!s.arrayVA && strcmp(s.exportFn, "PsSetCreateProcessNotifyRoutine") == 0)
+            s.arrayVA = FindArrayViaExport(hNt, userBase, kernBase,
+                                           "PsSetCreateProcessNotifyRoutineEx",
+                                           sections[0].arrayVA, dataBase, dataEnd);
     }
 
     FreeLibrary(hNt);
@@ -199,7 +233,9 @@ void CmdNotifyDisable(unsigned long long targetFn) {
     if (!hNt) { printf("[!] Cannot load ntoskrnl.exe\n"); return; }
     DWORD64 userBase = (DWORD64)hNt;
 
-    // Resolve all three arrays up front so CreateProcess can skip LoadImage's VA.
+    DWORD64 dataBase = 0, dataEnd = 0;
+    GetSectionRange(hNt, ".data", &dataBase, &dataEnd);
+
     const char* exportNames[] = {
         "PsRemoveLoadImageNotifyRoutine",
         "PsSetCreateProcessNotifyRoutineEx",
@@ -207,9 +243,16 @@ void CmdNotifyDisable(unsigned long long targetFn) {
         nullptr
     };
     DWORD64 arrays[3]{};
-    arrays[0] = FindArrayViaExport(hNt, userBase, kernBase, exportNames[0]);
-    arrays[1] = FindArrayViaExport(hNt, userBase, kernBase, exportNames[1], arrays[0]);
-    arrays[2] = FindArrayViaExport(hNt, userBase, kernBase, exportNames[2]);
+    arrays[0] = FindArrayViaExport(hNt, userBase, kernBase, exportNames[0],
+                                   0, dataBase, dataEnd);
+    // Try PsSetCreateProcessNotifyRoutine first; fall back to Ex variant
+    arrays[1] = FindArrayViaExport(hNt, userBase, kernBase, "PsSetCreateProcessNotifyRoutine",
+                                   arrays[0], dataBase, dataEnd);
+    if (!arrays[1])
+        arrays[1] = FindArrayViaExport(hNt, userBase, kernBase, exportNames[1],
+                                       arrays[0], dataBase, dataEnd);
+    arrays[2] = FindArrayViaExport(hNt, userBase, kernBase, exportNames[2],
+                                   0, dataBase, dataEnd);
 
     bool found = false;
     for (int t = 0; exportNames[t] && !found; t++) {

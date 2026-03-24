@@ -22,8 +22,27 @@ static inline uint64_t DecodeRef(uint64_t ref) { return ref & ~(uint64_t)0xF; }
 
 // Returns the RVA of the Psp*NotifyRoutine array found inside exportFn,
 // or 0 on failure.  Pure user-mode: loads ntoskrnl.exe as a DLL, byte-scans.
+// Get .data section RVA range from PE headers
+static bool GetDataSection(HMODULE hNt, uint64_t* base, uint64_t* end) {
+    auto* dos = (IMAGE_DOS_HEADER*)hNt;
+    auto* nt  = (IMAGE_NT_HEADERS64*)((BYTE*)hNt + dos->e_lfanew);
+    IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
+        char name[9]{}; memcpy(name, sec->Name, 8);
+        if (_stricmp(name, ".data") == 0) {
+            *base = sec->VirtualAddress;
+            *end  = sec->VirtualAddress + sec->Misc.VirtualSize;
+            return true;
+        }
+    }
+    return false;
+}
+
 static uint64_t ScanExportForLEA(HMODULE hNt, const char* exportFn,
-                                  uint64_t skipRVA = 0, int scanBytes = 512) {
+                                  uint64_t skipRVA  = 0,
+                                  uint64_t dataBase = 0,
+                                  uint64_t dataEnd  = 0,
+                                  int scanBytes     = 512) {
     BYTE* fn = (BYTE*)GetProcAddress(hNt, exportFn);
     if (!fn) return 0;
 
@@ -36,6 +55,7 @@ static uint64_t ScanExportForLEA(HMODULE hNt, const char* exportFn,
             uint64_t userTgt = (uint64_t)(fn + i + 7) + (int64_t)disp;
             uint64_t rva     = userTgt - (uint64_t)hNt;
             if (rva == skipRVA) continue;
+            if (dataBase != dataEnd && !(rva >= dataBase && rva < dataEnd)) continue;
             return rva;
         }
     }
@@ -102,10 +122,21 @@ int main() {
         GetModuleInformation(GetCurrentProcess(), hNt, &mi, sizeof(mi));
         uint64_t imageSize = mi.SizeOfImage;
 
-        // LoadImage first; pass its RVA as skipRVA when scanning CreateProcess
-        uint64_t rvaImage = ScanExportForLEA(hNt, "PsRemoveLoadImageNotifyRoutine");
-        uint64_t rvaProc  = ScanExportForLEA(hNt, "PsSetCreateProcessNotifyRoutineEx", rvaImage);
-        uint64_t rvaThr   = ScanExportForLEA(hNt, "PsRemoveCreateThreadNotifyRoutine");
+        uint64_t dataBase = 0, dataEnd = 0;
+        GetDataSection(hNt, &dataBase, &dataEnd);
+        printf("  [info] .data section RVA: 0x%llx - 0x%llx\n",
+               (unsigned long long)dataBase, (unsigned long long)dataEnd);
+
+        uint64_t rvaImage = ScanExportForLEA(hNt, "PsRemoveLoadImageNotifyRoutine",
+                                             0, dataBase, dataEnd);
+        // Try multiple exports; the Ex version may not have a direct LEA in .data
+        uint64_t rvaProc = ScanExportForLEA(hNt, "PsSetCreateProcessNotifyRoutine",
+                                            rvaImage, dataBase, dataEnd);
+        if (!rvaProc)
+            rvaProc = ScanExportForLEA(hNt, "PsSetCreateProcessNotifyRoutineEx",
+                                       rvaImage, dataBase, dataEnd);
+        uint64_t rvaThr   = ScanExportForLEA(hNt, "PsRemoveCreateThreadNotifyRoutine",
+                                             0, dataBase, dataEnd);
 
         struct { const char* label; uint64_t rva; } scans[] = {
             { "PspLoadImageNotifyRoutine",     rvaImage },
