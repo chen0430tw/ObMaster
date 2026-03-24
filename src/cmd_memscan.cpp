@@ -142,7 +142,8 @@ struct ModEntry {
 static std::vector<ModEntry> EnumModules(DWORD pid)
 {
     std::vector<ModEntry> result;
-    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    // TH32CS_SNAPMODULE32 causes ERROR_PARTIAL_COPY on some 64-bit targets; use SNAPMODULE only
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
     DBG("[memscan] CreateToolhelp32Snapshot(pid=%lu) -> %s (err=%lu)\n",
         pid, hSnap == INVALID_HANDLE_VALUE ? "INVALID" : "OK", GetLastError());
     if (hSnap == INVALID_HANDLE_VALUE) return result;
