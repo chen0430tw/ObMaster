@@ -133,3 +133,17 @@ TrustedInstaller holds `SeTakeOwnershipPrivilege` and `SeRelabelPrivilege` beyon
 
 - [Barakat/CVE-2019-16098](https://github.com/Barakat/CVE-2019-16098) — RTCore64 exploit
 - [Mattiwatti/CheekyBlinder](https://github.com/Mattiwatti/CheekyBlinder) — BYOVD callback removal reference
+
+---
+
+## Disclaimer
+
+This tool is provided **for educational and authorized security research purposes only**.
+
+- The BYOVD technique (Bring Your Own Vulnerable Driver) exploits a known vulnerability (CVE-2019-16098) in a legitimately signed driver. Loading or using vulnerable drivers on systems you do not own or have explicit written authorization to test **is illegal** in most jurisdictions.
+- ObMaster directly reads and writes kernel memory. Incorrect use can cause **immediate system crash (BSOD)** or data loss.
+- The `/runas` privilege escalation feature demonstrates token duplication techniques documented in public security research. It requires and operates within **existing Administrator privileges** — it does not exploit a vulnerability to bypass UAC or gain unauthorized access.
+- The author assumes **no liability** for any damage, data loss, or legal consequences arising from use of this software.
+- Do not use this tool against production systems, third-party infrastructure, or any system without proper authorization.
+
+**If you are unsure whether your use case is authorized, it is not.**
