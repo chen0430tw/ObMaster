@@ -54,7 +54,7 @@ static void Usage(const char* prog) {
         "    /notify [image|process|thread]  Enumerate Ps*NotifyRoutine arrays\n"
         "    /ndisable <fn_addr>             Zero EX_CALLBACK slot for matching entry\n\n"
         "  Deep scan:\n"
-        "    /memscan <pid>              Compare all loaded DLL sections vs on-disk image\n"
+        "    /memscan <pid> [all]        Compare DLL sections vs on-disk (default: skip .rdata/.data noise)\n"
         "    /memrestore <pid> <dll>     Restore modified sections from disk (CoW per-process)\n\n"
         "  Per-command help:\n"
         "    %s /<command> ?\n\n"
@@ -317,10 +317,12 @@ int main(int argc, char* argv[]) {
         CmdNotifyDisable(addr);
     }
     else if (_stricmp(cmd, "memscan") == 0) {
-        const char* pidStr = nextArg();
+        const char* pidStr = nextArg(0);
+        const char* a1     = nextArg(1);
         if (!pidStr) { printf("[!] /memscan requires a PID\n"); g_drv->Close(); return 1; }
         DWORD pid = (DWORD)strtoul(pidStr, nullptr, 10);
-        CmdMemScan(pid);
+        bool all = (a1 && _stricmp(a1, "all") == 0);
+        CmdMemScan(pid, all);
     }
     else if (_stricmp(cmd, "memrestore") == 0) {
         const char* pidStr = nextArg(0);

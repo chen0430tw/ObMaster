@@ -81,7 +81,20 @@ struct SectionDiff {
     DWORD       modBytes;   // number of bytes that differ
 };
 
-static std::vector<SectionDiff> DiffDll(HANDLE hProc, DWORD64 base, const wchar_t* path)
+// Sections that are legitimately modified at runtime (IAT, globals, relocs, resources).
+// We skip these by default to reduce noise; --all shows everything.
+static bool IsNoisySection(const char* name)
+{
+    static const char* skip[] = {
+        ".rdata", ".data", ".mrdata", ".didat", ".tls", ".rsrc", ".reloc", ".edata"
+    };
+    for (auto s : skip)
+        if (_stricmp(name, s) == 0) return true;
+    return false;
+}
+
+static std::vector<SectionDiff> DiffDll(HANDLE hProc, DWORD64 base, const wchar_t* path,
+                                         bool showAll = false)
 {
     std::vector<SectionDiff> result;
 
@@ -94,6 +107,7 @@ static std::vector<SectionDiff> DiffDll(HANDLE hProc, DWORD64 base, const wchar_
     for (auto& si : sections) {
         if (si.vsize == 0 || si.rawSize == 0) continue;
         if ((SIZE_T)(si.rawOff + si.rawSize) > disk.size()) continue;
+        if (!showAll && IsNoisySection(si.name)) continue;
 
         DWORD cmpLen = (std::min)(si.vsize, si.rawSize);
         std::vector<BYTE> mem(cmpLen, 0);
@@ -114,7 +128,7 @@ static std::vector<SectionDiff> DiffDll(HANDLE hProc, DWORD64 base, const wchar_
 
 // ─── /memscan ────────────────────────────────────────────────────────────────
 
-void CmdMemScan(DWORD pid)
+void CmdMemScan(DWORD pid, bool showAll)
 {
     HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
     if (!hProc) {
@@ -143,7 +157,7 @@ void CmdMemScan(DWORD pid)
         wchar_t path[MAX_PATH];
         if (!GetModuleFileNameExW(hProc, mods[i], path, MAX_PATH)) continue;
 
-        auto diffs = DiffDll(hProc, (DWORD64)mods[i], path);
+        auto diffs = DiffDll(hProc, (DWORD64)mods[i], path, showAll);
         if (diffs.empty()) continue;
 
         wchar_t* slash = wcsrchr(path, L'\\');
