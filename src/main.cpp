@@ -170,6 +170,11 @@ int main(int argc, char* argv[]) {
     // Accepts /flag  -flag  --flag  (--flag is not mangled by MSYS/Git Bash)
     auto stripDashes = [](const char* a) -> const char* {
         if (a[0]=='/' || a[0]=='-') { a++; if (a[0]=='-') a++; }
+        // MSYS/Git Bash expands /notify -> /C:/Program Files/Git/notify
+        // After stripping the leading slash we get a path; take the last component.
+        const char* slash = strrchr(a, '/');
+        if (!slash) slash = strrchr(a, '\\');
+        if (slash) a = slash + 1;
         return a;
     };
     for (int i = 1; i < argc; i++) {
