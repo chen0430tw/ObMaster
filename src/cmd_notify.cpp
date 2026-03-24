@@ -133,7 +133,7 @@ void CmdNotify(bool doImage, bool doProcess, bool doThread) {
 
     struct { const char* label; const char* exportFn; bool enabled; DWORD64 arrayVA; } sections[] = {
         { "LoadImage",     "PsRemoveLoadImageNotifyRoutine",     doImage,   0 },
-        { "CreateProcess", "PsRemoveCreateProcessNotifyRoutine", doProcess, 0 },
+        { "CreateProcess", "PsSetCreateProcessNotifyRoutineEx", doProcess, 0 },
         { "CreateThread",  "PsRemoveCreateThreadNotifyRoutine",  doThread,  0 },
     };
 
@@ -191,7 +191,7 @@ void CmdNotifyDisable(unsigned long long targetFn) {
 
     const char* exports[] = {
         "PsRemoveLoadImageNotifyRoutine",
-        "PsRemoveCreateProcessNotifyRoutine",
+        "PsSetCreateProcessNotifyRoutineEx",
         "PsRemoveCreateThreadNotifyRoutine",
         nullptr
     };

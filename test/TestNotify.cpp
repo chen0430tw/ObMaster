@@ -98,7 +98,7 @@ int main() {
     } else {
         struct { const char* fn; const char* label; } scans[] = {
             { "PsRemoveLoadImageNotifyRoutine",     "PspLoadImageNotifyRoutine"    },
-            { "PsRemoveCreateProcessNotifyRoutine", "PspCreateProcessNotifyRoutine"},
+            { "PsSetCreateProcessNotifyRoutineEx",  "PspCreateProcessNotifyRoutine"},
             { "PsRemoveCreateThreadNotifyRoutine",  "PspCreateThreadNotifyRoutine" },
         };
 
