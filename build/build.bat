@@ -16,7 +16,7 @@ cd /d "%~dp0"
 
 echo [*] Building ObMaster...
 
-cl.exe /nologo /O2 /MT /EHsc /std:c++17 ^
+cl.exe /nologo /O2 /MT /EHsc /std:c++17 /utf-8 ^
     /I"%SRC%" ^
     "%SRC%\main.cpp" ^
     "%SRC%\kutil.cpp" ^
