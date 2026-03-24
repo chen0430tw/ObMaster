@@ -1,8 +1,22 @@
+# Build output
 build/*.exe
 build/*.obj
 build/*.pdb
 build/*.ilk
 build/*.exp
 build/*.lib
+
+# Test binaries
+test/*.exe
+test/*.obj
+test/*.pdb
+
+# Root-level stray build artifacts
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+
 *.user
 .vs/
