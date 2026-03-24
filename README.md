@@ -2,7 +2,7 @@
 
 > BYOVD-powered kernel toolkit — see what System Informer can't.
 
-Process inspection, PPL bypass, privilege escalation, service/driver enumeration, network state, and ObRegisterCallbacks management via RTCore64.sys (CVE-2019-16098).
+Process inspection, PPL bypass, privilege escalation, service/driver enumeration, network state, ObRegisterCallbacks management, and Ps\*NotifyRoutine enumeration/disable via RTCore64.sys (CVE-2019-16098).
 
 ## Commands
 
@@ -46,6 +46,7 @@ Process inspection, PPL bypass, privilege escalation, service/driver enumeration
 |---|---|
 | `/json` `--json` | Machine-readable JSON output — pipe to `jq`, agents, or scripts |
 | `/quiet` `--quiet` | Suppress ASCII banner |
+| `/debug` `--debug` | Verbose diagnostics: export scan progress, array VAs, per-slot raw values |
 
 > `/flag`, `-flag`, and `--flag` are all accepted. Use `--flag` in bash/Cygwin/Git Bash to avoid MSYS path expansion.
 
@@ -88,14 +89,14 @@ del C:\Windows\System32\drivers\RTCore64.sys
 
 ## Build
 
-```
+```bat
 cd build
 build.bat
 ```
 
-Requires Visual Studio 2022 BuildTools + Windows SDK 10.0.26100.0.
+Requires Visual Studio 2022 BuildTools + Windows SDK 10.0.26100.0. `do_build2.bat` is an alternative that sets compiler paths directly without relying on `VsDevCmd.bat`.
 
-**Note on output encoding:** `main.cpp` calls `SetConsoleOutputCP(CP_UTF8)` so the banner and all output is UTF-8. When invoking from PowerShell, set the input encoding to match before running, otherwise box-drawing characters in the banner will appear garbled:
+**Note on output encoding:** `main.cpp` calls `SetConsoleOutputCP(CP_UTF8)` so the banner and all output is UTF-8. When invoking from PowerShell, set the encoding to match before running, otherwise box-drawing characters in the banner will appear garbled:
 
 ```powershell
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -103,6 +104,16 @@ Requires Visual Studio 2022 BuildTools + Windows SDK 10.0.26100.0.
 ```
 
 This is not needed when running from `cmd.exe` or when using `--quiet` to suppress the banner.
+
+## Tests
+
+```bat
+cd test
+build_test.bat          :: builds TestTarget.exe (zombie process / service helper)
+build_test_notify.bat   :: builds TestNotify.exe (pure user-mode, no driver required)
+TestNotify.exe          :: validates DecodeRef, EX_CALLBACK_ROUTINE_BLOCK offsets,
+                        ::   and LEA scan results against live ntoskrnl.exe
+```
 
 ## Architecture
 
@@ -114,7 +125,7 @@ ObMaster
 │   │   ├── RTCore64Backend.*      MSI Afterburner CVE-2019-16098 (default)
 │   │   └── GigabyteBackend.h      GIBT.sys placeholder
 │   ├── ansi.h                     ANSI color helpers (VT processing)
-│   ├── globals.h                  Global flags (g_jsonMode, g_quiet, g_ansiEnabled)
+│   ├── globals.h                  Global flags (g_jsonMode, g_quiet, g_ansiEnabled, g_debug)
 │   ├── jutil.h                    JSON string/address helpers
 │   ├── kutil.*                    Kernel helpers, EPROCESS walker, driver cache
 │   ├── cmd_proc.cpp               /proc + /kill
@@ -122,10 +133,17 @@ ObMaster
 │   ├── cmd_services.cpp           /services
 │   ├── cmd_net.cpp                /net
 │   ├── cmd_obcb.cpp               /obcb + /disable + /enable
+│   ├── cmd_notify.cpp             /notify + /ndisable
 │   ├── cmd_runas.cpp              /runas system|ti
 │   └── main.cpp
-└── build/
-    └── build.bat
+├── build/
+│   ├── build.bat                  Main build script
+│   └── do_build2.bat              Alternative (explicit compiler paths)
+└── test/
+    ├── TestTarget.cpp             Zombie process / service install helper
+    ├── TestNotify.cpp             User-mode unit tests for cmd_notify internals
+    ├── build_test.bat
+    └── build_test_notify.bat
 ```
 
 ## Technical notes
@@ -173,6 +191,18 @@ TrustedInstaller holds `SeTakeOwnershipPrivilege` and `SeRelabelPrivilege` beyon
 | `PostOperation` | `+0x030` |
 
 `_OBJECT_TYPE.CallbackList` (head) at `+0x0C8`.
+
+### Ps\*NotifyRoutine internals
+
+The three notify arrays (`PspLoadImageNotifyRoutine`, `PspCreateProcessNotifyRoutine`, `PspCreateThreadNotifyRoutine`) are not exported by ntoskrnl. They are located at runtime by:
+
+1. Loading `ntoskrnl.exe` as a user-mode DLL to access its export table and bytes.
+2. Scanning the corresponding `PsRemove*` / `PsSet*` export for the first **RIP-relative LEA** (`REX.W 8D /r mod=00 rm=101`) whose target RVA falls inside the `.data` section.
+3. Applying the RVA to the live kernel base.
+
+`PsSetCreateProcessNotifyRoutineEx`'s first in-`.data` LEA hits `PspLoadImageNotifyRoutine`; the scanner skips it via `skipVA` and falls back to `PsSetCreateProcessNotifyRoutine`.
+
+Each array entry is an `EX_CALLBACK` (`EX_FAST_REF`). Decoding: `block = value & ~0xF`. The actual callback is at `block + 0x08` (`EX_CALLBACK_ROUTINE_BLOCK.Function`). `/ndisable` zeroes the array slot; the kernel skips NULL entries on iteration.
 
 ## Credits
 
