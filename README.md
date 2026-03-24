@@ -47,8 +47,33 @@ ObMaster /<command> ?
 
 - Windows 10 x64 (tested on 22H2 build 19045)
 - Administrator privileges
-- RTCore64.sys loaded: `sc start RTCore64`
-  - Extract from MSI Afterburner installer, or use CheekyBlinder `/installDriver`
+- RTCore64.sys loaded (see setup below)
+
+## Driver Setup
+
+RTCore64.sys is **not included** in this repository. Obtain it from the MSI Afterburner installer (it is a legitimately signed driver bundled with the software).
+
+```bat
+:: 1. Place the driver (any path works; System32\drivers is conventional)
+copy RTCore64.sys C:\Windows\System32\drivers\RTCore64.sys
+
+:: 2. Register as kernel driver service
+sc create RTCore64 type=kernel binPath=C:\Windows\System32\drivers\RTCore64.sys
+
+:: 3. Start
+sc start RTCore64
+
+:: 4. Verify ObMaster can open it
+ObMaster.exe /drivers
+```
+
+**Cleanup when done** (recommended — don't leave a vulnerable driver loaded):
+
+```bat
+sc stop RTCore64
+sc delete RTCore64
+del C:\Windows\System32\drivers\RTCore64.sys
+```
 
 ## Build
 
