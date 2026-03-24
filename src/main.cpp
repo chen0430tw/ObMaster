@@ -55,7 +55,7 @@ static void Usage(const char* prog) {
         "    /ndisable <fn_addr>             Zero EX_CALLBACK slot for matching entry\n\n"
         "  Deep scan:\n"
         "    /memscan <pid> [all]        Compare DLL sections vs on-disk (default: skip .rdata/.data noise)\n"
-        "    /memrestore <pid> <dll>     Restore modified sections from disk (CoW per-process)\n\n"
+        "    /memrestore <pid> <dll> [sec]  Restore sections from disk (default: skip noisy sections)\n\n"
         "  Per-command help:\n"
         "    %s /<command> ?\n\n"
         "Note: Requires RTCore64.sys running. Install via: sc create RTCore64 ...\n",
@@ -325,13 +325,14 @@ int main(int argc, char* argv[]) {
         CmdMemScan(pid, all);
     }
     else if (_stricmp(cmd, "memrestore") == 0) {
-        const char* pidStr = nextArg(0);
-        const char* dll    = nextArg(1);
+        const char* pidStr  = nextArg(0);
+        const char* dll     = nextArg(1);
+        const char* section = nextArg(2);   // optional: e.g. ".00cfg"
         if (!pidStr || !dll) {
-            printf("[!] /memrestore requires <pid> <dll>\n"); g_drv->Close(); return 1;
+            printf("[!] /memrestore requires <pid> <dll> [section]\n"); g_drv->Close(); return 1;
         }
         DWORD pid = (DWORD)strtoul(pidStr, nullptr, 10);
-        CmdMemRestore(pid, dll);
+        CmdMemRestore(pid, dll, section);
     }
     else {
         if (g_jsonMode)

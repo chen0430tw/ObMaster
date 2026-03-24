@@ -15,4 +15,5 @@ void CmdEpDump(DWORD pid);                  // /epdump <pid>  (offset probe)
 void CmdNotify(bool doImage, bool doProcess, bool doThread); // /notify [image|process|thread]
 void CmdNotifyDisable(unsigned long long fn);                // /ndisable <addr>
 void CmdMemScan(DWORD pid, bool showAll = false);            // /memscan <pid> [all]
-void CmdMemRestore(DWORD pid, const char* dll);              // /memrestore <pid> <dll>
+void CmdMemRestore(DWORD pid, const char* dll,
+                   const char* section = nullptr);           // /memrestore <pid> <dll> [section]

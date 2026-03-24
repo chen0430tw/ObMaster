@@ -201,7 +201,8 @@ void CmdMemScan(DWORD pid, bool showAll)
 
 // ─── /memrestore ─────────────────────────────────────────────────────────────
 
-void CmdMemRestore(DWORD pid, const char* dllFilter)
+// sectionFilter: optional section name to restore (e.g. ".00cfg"); nullptr = all non-noisy
+void CmdMemRestore(DWORD pid, const char* dllFilter, const char* sectionFilter)
 {
     HANDLE hProc = OpenProcess(
         PROCESS_QUERY_INFORMATION | PROCESS_VM_READ |
@@ -263,6 +264,11 @@ void CmdMemRestore(DWORD pid, const char* dllFilter)
         for (auto& si : sections) {
             if (si.vsize == 0 || si.rawSize == 0) continue;
             if ((SIZE_T)(si.rawOff + si.rawSize) > disk.size()) continue;
+
+            // Filter: if a specific section name was requested, skip others
+            if (sectionFilter && _stricmp(si.name, sectionFilter) != 0) continue;
+            // Default: skip noisy sections (IAT, globals, etc.) to avoid breaking the process
+            if (!sectionFilter && IsNoisySection(si.name)) continue;
 
             DWORD64 secVA  = base + si.rva;
             DWORD   cmpLen = (std::min)(si.vsize, si.rawSize);
