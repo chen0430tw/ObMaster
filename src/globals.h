@@ -5,3 +5,6 @@ extern bool g_jsonMode;     // /json  — output machine-readable JSON instead o
 extern bool g_quiet;        // /quiet — suppress banner (for scripting / agent use)
 extern bool g_ansiEnabled;  // true when VT processing is active on stdout
 extern bool g_debug;        // /debug — verbose diagnostics (export scan, slot reads, etc.)
+
+// Debug print macro — enabled by --debug flag
+#define DBG(...) do { if (g_debug) { printf("  [dbg] " __VA_ARGS__); } } while(0)

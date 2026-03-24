@@ -34,8 +34,6 @@
 
 static inline DWORD64 DecodeRef(DWORD64 ref) { return ref & ~(DWORD64)0xF; }
 
-#define DBG(...) do { if (g_debug) { printf("  [dbg] " __VA_ARGS__); } } while(0)
-
 // Return the RVA range of a named PE section in the loaded module.
 // Returns false if section not found.
 static bool GetSectionRange(HMODULE hNt, const char* secName,

@@ -1,19 +1,19 @@
 // cmd_memscan.cpp — /memscan and /memrestore
 //
-// /memscan <pid>            Compare every loaded DLL's sections against its on-disk image.
-//                           Reports sections that differ and the number of modified bytes.
+// /memscan <pid> [all]         Compare every loaded DLL's sections against its on-disk image.
+//                              Reports sections that differ and the number of modified bytes.
+//                              Default: skip noisy sections (.rdata/.data/etc). Pass 'all' for everything.
 //
-// /memrestore <pid> <dll>   Restore modified sections of a DLL in a process by writing the
-//                           original on-disk bytes back via VirtualProtectEx + WriteProcessMemory.
-//                           Creates a private CoW copy for the target process.
-//
-// Neither command requires the kernel driver; they use standard Win32 process APIs.
+// /memrestore <pid> <dll> [sec] Restore modified sections of a DLL in a process by writing the
+//                              original on-disk bytes back via VirtualProtectEx + WriteProcessMemory.
+//                              Pass an optional section name (e.g. .00cfg) to limit the restore.
+//                              Creates a private CoW copy for the target process.
 
 #include "globals.h"
 #include "ansi.h"
 #include "jutil.h"
 #include <windows.h>
-#include <psapi.h>
+#include <tlhelp32.h>
 #include <vector>
 #include <string>
 #include <cstdio>
@@ -76,13 +76,8 @@ static bool ParsePEHeaders(HANDLE hProc, DWORD64 base,
     return !sections.empty();
 }
 
-struct SectionDiff {
-    SectionInfo si;
-    DWORD       modBytes;   // number of bytes that differ
-};
-
 // Sections that are legitimately modified at runtime (IAT, globals, relocs, resources).
-// We skip these by default to reduce noise; --all shows everything.
+// Skipped by default to reduce noise; pass showAll=true to include them.
 static bool IsNoisySection(const char* name)
 {
     static const char* skip[] = {
@@ -92,6 +87,11 @@ static bool IsNoisySection(const char* name)
         if (_stricmp(name, s) == 0) return true;
     return false;
 }
+
+struct SectionDiff {
+    SectionInfo si;
+    DWORD       modBytes;
+};
 
 static std::vector<SectionDiff> DiffDll(HANDLE hProc, DWORD64 base, const wchar_t* path,
                                          bool showAll = false)
@@ -107,12 +107,16 @@ static std::vector<SectionDiff> DiffDll(HANDLE hProc, DWORD64 base, const wchar_
     for (auto& si : sections) {
         if (si.vsize == 0 || si.rawSize == 0) continue;
         if ((SIZE_T)(si.rawOff + si.rawSize) > disk.size()) continue;
-        if (!showAll && IsNoisySection(si.name)) continue;
+        if (!showAll && IsNoisySection(si.name)) {
+            DBG("[memscan]   section %-8s  skipped (noisy)\n", si.name); continue;
+        }
 
         DWORD cmpLen = (std::min)(si.vsize, si.rawSize);
         std::vector<BYTE> mem(cmpLen, 0);
         SIZE_T got = 0;
         ReadProcessMemory(hProc, (LPCVOID)(base + si.rva), mem.data(), cmpLen, &got);
+        DBG("[memscan]   section %-8s  RVA=%08X  cmpLen=%u  got=%zu\n",
+            si.name, si.rva, cmpLen, got);
         if (got == 0) continue;
 
         DWORD mod = 0;
@@ -120,9 +124,45 @@ static std::vector<SectionDiff> DiffDll(HANDLE hProc, DWORD64 base, const wchar_
         for (DWORD b = 0; b < check; b++) {
             if (mem[b] != disk[si.rawOff + b]) mod++;
         }
+        DBG("[memscan]   section %-8s  modified=%u bytes\n", si.name, mod);
         if (mod > 0)
             result.push_back({ si, mod });
     }
+    return result;
+}
+
+// ─── Module enumeration via Toolhelp32 (avoids ERROR_PARTIAL_COPY from EnumProcessModules) ──
+
+struct ModEntry {
+    DWORD64      base;
+    std::wstring path;
+    std::wstring name;
+};
+
+static std::vector<ModEntry> EnumModules(DWORD pid)
+{
+    std::vector<ModEntry> result;
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    DBG("[memscan] CreateToolhelp32Snapshot(pid=%lu) -> %s (err=%lu)\n",
+        pid, hSnap == INVALID_HANDLE_VALUE ? "INVALID" : "OK", GetLastError());
+    if (hSnap == INVALID_HANDLE_VALUE) return result;
+
+    MODULEENTRY32W me;
+    me.dwSize = sizeof(me);
+    BOOL ok = Module32FirstW(hSnap, &me);
+    DBG("[memscan] Module32FirstW -> %s (err=%lu)\n", ok ? "OK" : "FAIL", GetLastError());
+    if (ok) {
+        do {
+            ModEntry e;
+            e.base = (DWORD64)me.modBaseAddr;
+            e.path = me.szExePath;
+            e.name = me.szModule;
+            DBG("[memscan]   mod: %ls @ %016llX\n", e.name.c_str(), e.base);
+            result.push_back(std::move(e));
+        } while (Module32NextW(hSnap, &me));
+    }
+    CloseHandle(hSnap);
+    DBG("[memscan] EnumModules: %zu entries\n", result.size());
     return result;
 }
 
@@ -136,39 +176,32 @@ void CmdMemScan(DWORD pid, bool showAll)
         return;
     }
 
-    HMODULE mods[512];
-    DWORD needed = 0;
-    if (!EnumProcessModules(hProc, mods, sizeof(mods), &needed)) {
-        printf("%s[!]%s EnumProcessModules failed: %lu\n", A_RED, A_RESET, GetLastError());
+    auto mods = EnumModules(pid);
+    if (mods.empty()) {
+        printf("%s[!]%s Failed to enumerate modules for PID %lu (err %lu)\n",
+               A_RED, A_RESET, pid, GetLastError());
         CloseHandle(hProc); return;
     }
-
-    DWORD nMods = needed / sizeof(HMODULE);
 
     if (g_jsonMode) {
         printf("{\"pid\":%lu,\"modules\":[", pid);
     } else {
-        printf("=== MemScan PID %lu (%lu modules) ===\n\n", pid, nMods);
+        printf("=== MemScan PID %lu (%zu modules) ===\n\n", pid, mods.size());
     }
 
     bool anyDiff = false;
     bool first   = true;
-    for (DWORD i = 0; i < nMods; i++) {
-        wchar_t path[MAX_PATH];
-        if (!GetModuleFileNameExW(hProc, mods[i], path, MAX_PATH)) continue;
-
-        auto diffs = DiffDll(hProc, (DWORD64)mods[i], path, showAll);
+    for (auto& mod : mods) {
+        auto diffs = DiffDll(hProc, mod.base, mod.path.c_str(), showAll);
         if (diffs.empty()) continue;
 
-        wchar_t* slash = wcsrchr(path, L'\\');
-        wchar_t* fname = slash ? slash + 1 : path;
         anyDiff = true;
 
         if (g_jsonMode) {
             if (!first) printf(",");
             first = false;
             printf("{\"module\":\"%ls\",\"base\":\"0x%llX\",\"sections\":[",
-                   fname, (DWORD64)mods[i]);
+                   mod.name.c_str(), mod.base);
             bool sf = true;
             for (auto& d : diffs) {
                 if (!sf) printf(",");
@@ -179,7 +212,7 @@ void CmdMemScan(DWORD pid, bool showAll)
             printf("]}");
         } else {
             printf("  %s%ls%s  base=%016llX\n",
-                   A_YELLOW, fname, A_RESET, (DWORD64)mods[i]);
+                   A_YELLOW, mod.name.c_str(), A_RESET, mod.base);
             for (auto& d : diffs) {
                 printf("    %s%-8s%s  RVA=%08X  size=%6u  %s%u modified bytes%s\n",
                        A_CYAN, d.si.name, A_RESET,
@@ -213,50 +246,41 @@ void CmdMemRestore(DWORD pid, const char* dllFilter, const char* sectionFilter)
         return;
     }
 
-    HMODULE mods[512];
-    DWORD needed = 0;
-    if (!EnumProcessModules(hProc, mods, sizeof(mods), &needed)) {
-        printf("%s[!]%s EnumProcessModules failed: %lu\n", A_RED, A_RESET, GetLastError());
+    auto mods = EnumModules(pid);
+    if (mods.empty()) {
+        printf("%s[!]%s Failed to enumerate modules for PID %lu (err %lu)\n",
+               A_RED, A_RESET, pid, GetLastError());
         CloseHandle(hProc); return;
     }
 
-    DWORD nMods = needed / sizeof(HMODULE);
-
-    // Convert filter to wide for comparison
+    // Convert filter to wide
     wchar_t wFilter[MAX_PATH];
     MultiByteToWideChar(CP_UTF8, 0, dllFilter, -1, wFilter, MAX_PATH);
 
     bool found = false;
-    for (DWORD i = 0; i < nMods; i++) {
-        wchar_t path[MAX_PATH];
-        if (!GetModuleFileNameExW(hProc, mods[i], path, MAX_PATH)) continue;
-
-        wchar_t* slash = wcsrchr(path, L'\\');
-        wchar_t* fname = slash ? slash + 1 : path;
-
-        // Match by full filename or substring (case-insensitive)
-        if (_wcsicmp(fname, wFilter) != 0) {
-            // Try without extension (e.g. "ntdll" matches "ntdll.dll")
+    for (auto& mod : mods) {
+        // Match by full filename or without extension (case-insensitive)
+        if (_wcsicmp(mod.name.c_str(), wFilter) != 0) {
             wchar_t stripped[MAX_PATH];
-            wcscpy_s(stripped, fname);
+            wcscpy_s(stripped, mod.name.c_str());
             wchar_t* dot = wcsrchr(stripped, L'.');
             if (dot) *dot = 0;
             if (_wcsicmp(stripped, wFilter) != 0) continue;
         }
 
         found = true;
-        DWORD64 base = (DWORD64)mods[i];
-        printf("[*] Restoring %ls  base=%016llX  PID=%lu\n", fname, base, pid);
+        printf("[*] Restoring %ls  base=%016llX  PID=%lu\n",
+               mod.name.c_str(), mod.base, pid);
 
         std::vector<SectionInfo> sections;
-        if (!ParsePEHeaders(hProc, base, sections)) {
+        if (!ParsePEHeaders(hProc, mod.base, sections)) {
             printf("%s[!]%s Failed to parse PE headers\n", A_RED, A_RESET);
             break;
         }
 
-        auto disk = ReadDllFromDisk(path);
+        auto disk = ReadDllFromDisk(mod.path.c_str());
         if (disk.empty()) {
-            printf("%s[!]%s Cannot read %ls from disk\n", A_RED, A_RESET, path);
+            printf("%s[!]%s Cannot read from disk: %ls\n", A_RED, A_RESET, mod.path.c_str());
             break;
         }
 
@@ -265,12 +289,12 @@ void CmdMemRestore(DWORD pid, const char* dllFilter, const char* sectionFilter)
             if (si.vsize == 0 || si.rawSize == 0) continue;
             if ((SIZE_T)(si.rawOff + si.rawSize) > disk.size()) continue;
 
-            // Filter: if a specific section name was requested, skip others
+            // Filter by section name if specified
             if (sectionFilter && _stricmp(si.name, sectionFilter) != 0) continue;
-            // Default: skip noisy sections (IAT, globals, etc.) to avoid breaking the process
+            // Default: skip noisy sections to avoid overwriting IAT / globals
             if (!sectionFilter && IsNoisySection(si.name)) continue;
 
-            DWORD64 secVA  = base + si.rva;
+            DWORD64 secVA  = mod.base + si.rva;
             DWORD   cmpLen = (std::min)(si.vsize, si.rawSize);
 
             // Read current memory
@@ -280,14 +304,14 @@ void CmdMemRestore(DWORD pid, const char* dllFilter, const char* sectionFilter)
             if (got == 0) continue;
 
             // Count differences
-            DWORD mod = 0;
+            DWORD mod_count = 0;
             for (DWORD b = 0; b < (DWORD)(std::min)((SIZE_T)cmpLen, got); b++) {
-                if (mem[b] != disk[si.rawOff + b]) mod++;
+                if (mem[b] != disk[si.rawOff + b]) mod_count++;
             }
-            if (mod == 0) continue;
+            if (mod_count == 0) continue;
 
             printf("  [*] %-8s  RVA=%08X  %u modified bytes -> restoring...",
-                   si.name, si.rva, mod);
+                   si.name, si.rva, mod_count);
 
             // Unlock + write + relock
             DWORD oldProt = 0;
