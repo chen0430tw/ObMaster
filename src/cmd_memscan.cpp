@@ -350,58 +350,73 @@ void CmdMemRestore(DWORD pid, const char* dllFilter, const char* sectionFilter)
 // ─── /watchfix ───────────────────────────────────────────────────────────────
 //
 // Poll for every new instance of <procName>, then immediately run CmdMemRestore
-// on it before VBox's hardening self-check fires.
+// for each <dll>[:<section>] target on the new PID before hardening fires.
 //
-// Usage: /watchfix <process.exe> <dll> [section]
-//   e.g. /watchfix VirtualBoxVM.exe ntdll.dll .00cfg
+// Usage: /watchfix <process.exe> <dll>[:<section>] [<dll>[:<section>] ...]
+//   e.g. /watchfix VirtualBoxVM.exe ntdll.dll:.00cfg VirtualBoxVM.exe:.00cfg
 //
 // Press Ctrl-C to stop.
 
-void CmdWatchFix(const char* procName, const char* dllFilter, const char* sectionFilter)
-{
-    wchar_t wTarget[MAX_PATH];
-    MultiByteToWideChar(CP_UTF8, 0, procName, -1, wTarget, MAX_PATH);
+struct WatchTarget {
+    std::string dll;
+    std::string section;  // empty = restore all non-noisy sections
+};
 
-    printf("[*] Watching for %s%s%s — will restore %s%s%s [%s] on each new instance\n",
-           A_YELLOW, procName, A_RESET,
-           A_CYAN, dllFilter, A_RESET,
-           sectionFilter ? sectionFilter : "non-noisy sections");
+void CmdWatchFix(const char* procName,
+                 const std::vector<WatchTarget>& targets)
+{
+    wchar_t wProcName[MAX_PATH];
+    MultiByteToWideChar(CP_UTF8, 0, procName, -1, wProcName, MAX_PATH);
+
+    printf("[*] Watching for %s%s%s — %zu fix target(s) per instance\n",
+           A_YELLOW, procName, A_RESET, targets.size());
+    for (auto& t : targets)
+        printf("      %s%s%s  section=%s\n",
+               A_CYAN, t.dll.c_str(), A_RESET,
+               t.section.empty() ? "(non-noisy)" : t.section.c_str());
     printf("    Press Ctrl-C to stop.\n\n");
+    fflush(stdout);
 
     std::vector<DWORD> fixed;
 
     while (true) {
         HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (hSnap == INVALID_HANDLE_VALUE) { Sleep(100); continue; }
+        if (hSnap != INVALID_HANDLE_VALUE) {
+            PROCESSENTRY32W pe;
+            pe.dwSize = sizeof(pe);
+            if (Process32FirstW(hSnap, &pe)) {
+                do {
+                    if (_wcsicmp(pe.szExeFile, wProcName) != 0) continue;
+                    DWORD pid = pe.th32ProcessID;
 
-        PROCESSENTRY32W pe;
-        pe.dwSize = sizeof(pe);
-        if (Process32FirstW(hSnap, &pe)) {
-            do {
-                if (_wcsicmp(pe.szExeFile, wTarget) != 0) continue;
-                DWORD pid = pe.th32ProcessID;
+                    bool seen = false;
+                    for (DWORD p : fixed) if (p == pid) { seen = true; break; }
+                    if (seen) continue;
 
-                bool seen = false;
-                for (DWORD p : fixed) if (p == pid) { seen = true; break; }
-                if (seen) continue;
+                    printf("[+] New %s%s%s  PID=%lu\n",
+                           A_YELLOW, procName, A_RESET, pid);
+                    fflush(stdout);
 
-                printf("[+] New %s%s%s  PID=%lu  -> patching...\n",
-                       A_YELLOW, procName, A_RESET, pid);
+                    Sleep(20);  // let the process load its DLLs
 
-                Sleep(20);  // let the process load ntdll
+                    for (auto& t : targets) {
+                        CmdMemRestore(pid, t.dll.c_str(),
+                                      t.section.empty() ? nullptr : t.section.c_str());
+                        fflush(stdout);
+                    }
+                    fixed.push_back(pid);
 
-                CmdMemRestore(pid, dllFilter, sectionFilter);
-                fixed.push_back(pid);
+                    printf("  [*] Post-fix scan:\n");
+                    fflush(stdout);
+                    CmdMemScan(pid, false);
+                    fflush(stdout);
 
-                printf("  [*] Post-fix scan:\n");
-                CmdMemScan(pid, false);
-
-            } while (Process32NextW(hSnap, &pe));
+                } while (Process32NextW(hSnap, &pe));
+            }
+            CloseHandle(hSnap);
         }
-        CloseHandle(hSnap);
 
         if (fixed.size() > 256) fixed.erase(fixed.begin(), fixed.begin() + 128);
-
         Sleep(50);
     }
 }

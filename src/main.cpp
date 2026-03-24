@@ -169,6 +169,7 @@ static bool TryCommandHelp(const char* cmd) {
 
 int main(int argc, char* argv[]) {
     SetConsoleOutputCP(CP_UTF8);
+    setvbuf(stdout, nullptr, _IONBF, 0);  // unbuffered stdout (needed for /watchfix piped output)
 
     // ── Pre-scan global flags (can appear anywhere in argv) ───────────────────
     // Accepts /flag  -flag  --flag  (--flag is not mangled by MSYS/Git Bash)
@@ -336,13 +337,31 @@ int main(int argc, char* argv[]) {
         CmdMemRestore(pid, dll, section);
     }
     else if (_stricmp(cmd, "watchfix") == 0) {
-        const char* proc    = nextArg(0);
-        const char* dll     = nextArg(1);
-        const char* section = nextArg(2);
-        if (!proc || !dll) {
-            printf("[!] /watchfix requires <process.exe> <dll> [section]\n"); g_drv->Close(); return 1;
+        const char* proc = nextArg(0);
+        if (!proc) {
+            printf("[!] /watchfix requires <process.exe> <dll>[:<section>] ...\n");
+            g_drv->Close(); return 1;
         }
-        CmdWatchFix(proc, dll, section);
+        // Collect remaining args as dll[:section] targets
+        std::vector<WatchTarget> targets;
+        for (int skip = 1; ; skip++) {
+            const char* a = nextArg(skip);
+            if (!a) break;
+            WatchTarget t;
+            const char* colon = strchr(a, ':');
+            if (colon) {
+                t.dll     = std::string(a, colon);
+                t.section = std::string(colon + 1);
+            } else {
+                t.dll     = a;
+            }
+            targets.push_back(std::move(t));
+        }
+        if (targets.empty()) {
+            printf("[!] /watchfix requires at least one <dll>[:<section>] target\n");
+            g_drv->Close(); return 1;
+        }
+        CmdWatchFix(proc, targets);
     }
     else {
         if (g_jsonMode)
