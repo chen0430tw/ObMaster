@@ -34,6 +34,8 @@
 
 static inline DWORD64 DecodeRef(DWORD64 ref) { return ref & ~(DWORD64)0xF; }
 
+#define DBG(...) do { if (g_debug) { printf("  [dbg] " __VA_ARGS__); } } while(0)
+
 // Return the RVA range of a named PE section in the loaded module.
 // Returns false if section not found.
 static bool GetSectionRange(HMODULE hNt, const char* secName,
@@ -65,8 +67,9 @@ static DWORD64 FindArrayViaExport(HMODULE hNt, DWORD64 userBase, DWORD64 kernBas
                                   int scanBytes    = 512)
 {
     BYTE* fn = (BYTE*)GetProcAddress(hNt, exportFn);
-    if (!fn) return 0;
+    if (!fn) { DBG("%s: export not found\n", exportFn); return 0; }
 
+    DBG("%s: scanning %d bytes\n", exportFn, scanBytes);
     for (int i = 0; i < scanBytes - 6; i++) {
         // REX.W (48) or REX.WR (4C) + LEA (8D) + ModRM mod=00 rm=101
         if ((fn[i] == 0x48 || fn[i] == 0x4C) &&
@@ -77,12 +80,14 @@ static DWORD64 FindArrayViaExport(HMODULE hNt, DWORD64 userBase, DWORD64 kernBas
             DWORD64 userTgt = (DWORD64)(fn + i + 7) + (INT64)disp;
             DWORD64 rva     = userTgt - userBase;
             DWORD64 va      = kernBase + rva;
-            if (va == skipVA) continue;
-            // If a .data range was provided, reject anything outside it
-            if (dataBase != dataEnd && !(rva >= dataBase && rva < dataEnd)) continue;
+            DBG("  +%03d LEA -> rva=0x%llx va=%p", i, (unsigned long long)rva, (void*)va);
+            if (va == skipVA)                                      { printf(" [skip:dup]\n");       continue; }
+            if (dataBase != dataEnd && !(rva >= dataBase && rva < dataEnd)) { printf(" [skip:not .data]\n"); continue; }
+            printf(" [accept]\n");
             return va;
         }
     }
+    DBG("  no valid LEA found\n");
     return 0;
 }
 
@@ -101,16 +106,19 @@ static std::vector<NotifyEntry> ScanArray(DWORD64 arrayKVA) {
     std::vector<NotifyEntry> v;
     if (!arrayKVA) return v;
 
+    DBG("ScanArray @ %p\n", (void*)arrayKVA);
     for (int i = 0; i < NOTIFY_MAX; i++) {
         DWORD64 slotAddr = arrayKVA + (DWORD64)i * 8;
         DWORD64 rawRef   = g_drv->Rd64(slotAddr);
         if (!rawRef) continue;
 
         DWORD64 block = DecodeRef(rawRef);
-        if (!g_drv->IsKernelVA(block)) continue;
+        DBG("  slot[%d] raw=%p block=%p", i, (void*)rawRef, (void*)block);
+        if (!g_drv->IsKernelVA(block)) { printf(" [skip:bad block]\n"); continue; }
 
         DWORD64 fn = g_drv->Rd64(block + ECRB_FUNCTION);
-        if (!fn || !g_drv->IsKernelVA(fn)) continue;
+        if (!fn || !g_drv->IsKernelVA(fn)) { printf(" [skip:bad fn=%p]\n", (void*)fn); continue; }
+        DBG("  fn=%p\n", (void*)fn);
 
         NotifyEntry e{};
         e.index        = i;
@@ -166,9 +174,10 @@ void CmdNotify(bool doImage, bool doProcess, bool doThread) {
         { "CreateThread",  "PsRemoveCreateThreadNotifyRoutine",  doThread,  0 },
     };
 
-    // Restrict LEA results to the .data section to reject false positives.
     DWORD64 dataBase = 0, dataEnd = 0;
     GetSectionRange(hNt, ".data", &dataBase, &dataEnd);
+    DBG(".data RVA range: 0x%llx - 0x%llx\n",
+        (unsigned long long)dataBase, (unsigned long long)dataEnd);
 
     // Resolve LoadImage first; pass its VA as skipVA for CreateProcess since
     // PsSetCreateProcessNotifyRoutineEx's first LEA may land on the same array.
@@ -179,10 +188,13 @@ void CmdNotify(bool doImage, bool doProcess, bool doThread) {
         s.arrayVA = FindArrayViaExport(hNt, userBase, kernBase, s.exportFn,
                                        skip, dataBase, dataEnd);
         // Fallback for CreateProcess
-        if (!s.arrayVA && strcmp(s.exportFn, "PsSetCreateProcessNotifyRoutine") == 0)
+        if (!s.arrayVA && strcmp(s.exportFn, "PsSetCreateProcessNotifyRoutine") == 0) {
+            DBG("CreateProcess: primary failed, trying Ex fallback\n");
             s.arrayVA = FindArrayViaExport(hNt, userBase, kernBase,
                                            "PsSetCreateProcessNotifyRoutineEx",
                                            sections[0].arrayVA, dataBase, dataEnd);
+        }
+        DBG("%s array -> %p\n", s.label, (void*)s.arrayVA);
     }
 
     FreeLibrary(hNt);

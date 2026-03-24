@@ -14,6 +14,7 @@ IDriverBackend* g_drv = nullptr;
 bool g_jsonMode     = false;
 bool g_quiet        = false;
 bool g_ansiEnabled  = false;
+bool g_debug        = false;
 
 static void Banner() {
     printf(
@@ -33,7 +34,8 @@ static void Usage(const char* prog) {
         "Usage: %s [/json] [/quiet] <command> [args]\n\n"
         "  Global flags (can appear anywhere, /flag -flag --flag all accepted):\n"
         "    /json  --json         Machine-readable JSON output (for agents/scripts)\n"
-        "    /quiet --quiet        Suppress banner\n\n"
+        "    /quiet --quiet        Suppress banner\n"
+        "    /debug --debug        Verbose diagnostics (export scan, slot reads)\n\n"
         "  Process:\n"
         "    /proc                 List all processes (kernel walk, no ObCallback)\n"
         "    /kill <pid>           Terminate process (PPL bypass via EPROCESS.Protection)\n\n"
@@ -174,6 +176,7 @@ int main(int argc, char* argv[]) {
         const char* f = stripDashes(argv[i]);
         if (_stricmp(f, "json")  == 0) g_jsonMode = true;
         if (_stricmp(f, "quiet") == 0) g_quiet    = true;
+        if (_stricmp(f, "debug") == 0) g_debug    = true;
     }
 
     if (!g_jsonMode) AnsiInit();
@@ -186,6 +189,7 @@ int main(int argc, char* argv[]) {
         const char* f = stripDashes(argv[i]);
         if (_stricmp(f, "json")  == 0) continue;
         if (_stricmp(f, "quiet") == 0) continue;
+        if (_stricmp(f, "debug") == 0) continue;
         cmd    = f;
         cmdIdx = i;
         break;
