@@ -86,6 +86,15 @@ build.bat
 
 Requires Visual Studio 2022 BuildTools + Windows SDK 10.0.26100.0.
 
+**Note on output encoding:** `main.cpp` calls `SetConsoleOutputCP(CP_UTF8)` so the banner and all output is UTF-8. When invoking from PowerShell, set the input encoding to match before running, otherwise box-drawing characters in the banner will appear garbled:
+
+```powershell
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+& .\build\ObMaster.exe obcb
+```
+
+This is not needed when running from `cmd.exe` or when using `--quiet` to suppress the banner.
+
 ## Architecture
 
 ```
