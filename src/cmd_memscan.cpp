@@ -396,15 +396,40 @@ void CmdWatchFix(const char* procName,
                     printf("[+] New %s%s%s  PID=%lu\n",
                            A_YELLOW, procName, A_RESET, pid);
                     fflush(stdout);
+                    fixed.push_back(pid);  // mark first to avoid double-process
 
-                    Sleep(20);  // let the process load its DLLs
+                    // Suspend the target immediately so it can't advance to
+                    // its hardening self-check while we're patching.
+                    HANDLE hTarget = OpenProcess(
+                        PROCESS_SUSPEND_RESUME | PROCESS_VM_READ |
+                        PROCESS_VM_WRITE | PROCESS_VM_OPERATION |
+                        PROCESS_QUERY_INFORMATION, FALSE, pid);
+
+                    bool suspended = false;
+                    if (hTarget) {
+                        typedef LONG (WINAPI *FnSuspend)(HANDLE);
+                        static FnSuspend pSuspend = (FnSuspend)GetProcAddress(
+                            GetModuleHandleW(L"ntdll.dll"), "NtSuspendProcess");
+                        if (pSuspend && pSuspend(hTarget) >= 0) {
+                            suspended = true;
+                            DBG("[watchfix] PID=%lu suspended\n", pid);
+                        }
+                    }
 
                     for (auto& t : targets) {
                         CmdMemRestore(pid, t.dll.c_str(),
                                       t.section.empty() ? nullptr : t.section.c_str());
                         fflush(stdout);
                     }
-                    fixed.push_back(pid);
+
+                    if (suspended && hTarget) {
+                        typedef LONG (WINAPI *FnResume)(HANDLE);
+                        static FnResume pResume = (FnResume)GetProcAddress(
+                            GetModuleHandleW(L"ntdll.dll"), "NtResumeProcess");
+                        if (pResume) pResume(hTarget);
+                        DBG("[watchfix] PID=%lu resumed\n", pid);
+                    }
+                    if (hTarget) CloseHandle(hTarget);
 
                     printf("  [*] Post-fix scan:\n");
                     fflush(stdout);
@@ -417,6 +442,6 @@ void CmdWatchFix(const char* procName,
         }
 
         if (fixed.size() > 256) fixed.erase(fixed.begin(), fixed.begin() + 128);
-        Sleep(50);
+        Sleep(5);   // 5ms poll — fast enough to catch short-lived child processes
     }
 }
