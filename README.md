@@ -35,8 +35,10 @@ Process inspection, PPL bypass, privilege escalation, service/driver enumeration
 ### Global flags
 | Flag | Description |
 |---|---|
-| `/json` | Machine-readable JSON output — pipe to `jq`, agents, or scripts |
-| `/quiet` | Suppress ASCII banner |
+| `/json` `--json` | Machine-readable JSON output — pipe to `jq`, agents, or scripts |
+| `/quiet` `--quiet` | Suppress ASCII banner |
+
+> `/flag`, `-flag`, and `--flag` are all accepted. Use `--flag` in bash/Cygwin/Git Bash to avoid MSYS path expansion.
 
 ### Per-command help
 ```

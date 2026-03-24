@@ -31,9 +31,9 @@ static void Banner() {
 static void Usage(const char* prog) {
     printf(
         "Usage: %s [/json] [/quiet] <command> [args]\n\n"
-        "  Global flags (can appear anywhere):\n"
-        "    /json                 Machine-readable JSON output (for agents/scripts)\n"
-        "    /quiet                Suppress banner\n\n"
+        "  Global flags (can appear anywhere, /flag -flag --flag all accepted):\n"
+        "    /json  --json         Machine-readable JSON output (for agents/scripts)\n"
+        "    /quiet --quiet        Suppress banner\n\n"
         "  Process:\n"
         "    /proc                 List all processes (kernel walk, no ObCallback)\n"
         "    /kill <pid>           Terminate process (PPL bypass via EPROCESS.Protection)\n\n"
@@ -162,9 +162,13 @@ int main(int argc, char* argv[]) {
     SetConsoleOutputCP(CP_UTF8);
 
     // ── Pre-scan global flags (can appear anywhere in argv) ───────────────────
+    // Accepts /flag  -flag  --flag  (--flag is not mangled by MSYS/Git Bash)
+    auto stripDashes = [](const char* a) -> const char* {
+        if (a[0]=='/' || a[0]=='-') { a++; if (a[0]=='-') a++; }
+        return a;
+    };
     for (int i = 1; i < argc; i++) {
-        const char* a = argv[i];
-        const char* f = (a[0]=='/'||a[0]=='-') ? a+1 : a;
+        const char* f = stripDashes(argv[i]);
         if (_stricmp(f, "json")  == 0) g_jsonMode = true;
         if (_stricmp(f, "quiet") == 0) g_quiet    = true;
     }
@@ -176,8 +180,7 @@ int main(int argc, char* argv[]) {
     const char* cmd = nullptr;
     int         cmdIdx = -1;  // argv index of cmd
     for (int i = 1; i < argc; i++) {
-        const char* a = argv[i];
-        const char* f = (a[0]=='/'||a[0]=='-') ? a+1 : a;
+        const char* f = stripDashes(argv[i]);
         if (_stricmp(f, "json")  == 0) continue;
         if (_stricmp(f, "quiet") == 0) continue;
         cmd    = f;
@@ -222,7 +225,7 @@ int main(int argc, char* argv[]) {
         for (int i = cmdIdx + 1; i < argc; i++) {
             const char* a = argv[i];
             if (strcmp(a, "?") == 0) continue;
-            const char* f = (a[0]=='/'||a[0]=='-') ? a+1 : a;
+            const char* f = stripDashes(a);
             if (_stricmp(f,"json")==0 || _stricmp(f,"quiet")==0) continue;
             if (found++ == skip) return a;
         }
