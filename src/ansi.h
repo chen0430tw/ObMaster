@@ -1,5 +1,6 @@
 #pragma once
 #include <Windows.h>
+#include <cstdio>
 #include <io.h>
 
 // ─── ANSI terminal color support ─────────────────────────────────────────────

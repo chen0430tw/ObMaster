@@ -53,6 +53,9 @@ static void Usage(const char* prog) {
         "  NotifyRoutines:\n"
         "    /notify [image|process|thread]  Enumerate Ps*NotifyRoutine arrays\n"
         "    /ndisable <fn_addr>             Zero EX_CALLBACK slot for matching entry\n\n"
+        "  Deep scan:\n"
+        "    /memscan <pid>              Compare all loaded DLL sections vs on-disk image\n"
+        "    /memrestore <pid> <dll>     Restore modified sections from disk (CoW per-process)\n\n"
         "  Per-command help:\n"
         "    %s /<command> ?\n\n"
         "Note: Requires RTCore64.sys running. Install via: sc create RTCore64 ...\n",
@@ -312,6 +315,21 @@ int main(int argc, char* argv[]) {
         if (!addrStr) { printf("[!] /ndisable requires an address\n"); g_drv->Close(); return 1; }
         unsigned long long addr = strtoull(addrStr, nullptr, 16);
         CmdNotifyDisable(addr);
+    }
+    else if (_stricmp(cmd, "memscan") == 0) {
+        const char* pidStr = nextArg();
+        if (!pidStr) { printf("[!] /memscan requires a PID\n"); g_drv->Close(); return 1; }
+        DWORD pid = (DWORD)strtoul(pidStr, nullptr, 10);
+        CmdMemScan(pid);
+    }
+    else if (_stricmp(cmd, "memrestore") == 0) {
+        const char* pidStr = nextArg(0);
+        const char* dll    = nextArg(1);
+        if (!pidStr || !dll) {
+            printf("[!] /memrestore requires <pid> <dll>\n"); g_drv->Close(); return 1;
+        }
+        DWORD pid = (DWORD)strtoul(pidStr, nullptr, 10);
+        CmdMemRestore(pid, dll);
     }
     else {
         if (g_jsonMode)

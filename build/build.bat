@@ -29,6 +29,7 @@ cl.exe /nologo /O2 /MT /EHsc /std:c++17 /utf-8 ^
     "%SRC%\cmd_runas.cpp" ^
     "%SRC%\cmd_epdump.cpp" ^
     "%SRC%\cmd_notify.cpp" ^
+    "%SRC%\cmd_memscan.cpp" ^
     /Fe:"%OUT%" ^
     /link advapi32.lib psapi.lib iphlpapi.lib ws2_32.lib
 
