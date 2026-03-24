@@ -22,7 +22,8 @@ static inline uint64_t DecodeRef(uint64_t ref) { return ref & ~(uint64_t)0xF; }
 
 // Returns the RVA of the Psp*NotifyRoutine array found inside exportFn,
 // or 0 on failure.  Pure user-mode: loads ntoskrnl.exe as a DLL, byte-scans.
-static uint64_t ScanExportForLEA(HMODULE hNt, const char* exportFn, int scanBytes = 256) {
+static uint64_t ScanExportForLEA(HMODULE hNt, const char* exportFn,
+                                  uint64_t skipRVA = 0, int scanBytes = 512) {
     BYTE* fn = (BYTE*)GetProcAddress(hNt, exportFn);
     if (!fn) return 0;
 
@@ -31,9 +32,10 @@ static uint64_t ScanExportForLEA(HMODULE hNt, const char* exportFn, int scanByte
              fn[i+1] == 0x8D &&
             (fn[i+2] & 0xC7) == 0x05)
         {
-            INT32 disp      = *(INT32*)(fn + i + 3);
+            INT32 disp       = *(INT32*)(fn + i + 3);
             uint64_t userTgt = (uint64_t)(fn + i + 7) + (int64_t)disp;
             uint64_t rva     = userTgt - (uint64_t)hNt;
+            if (rva == skipRVA) continue;
             return rva;
         }
     }
@@ -96,21 +98,30 @@ int main() {
     if (!hNt) {
         printf("  [SKIP] Cannot load ntoskrnl.exe (error %lu)\n", GetLastError());
     } else {
-        struct { const char* fn; const char* label; } scans[] = {
-            { "PsRemoveLoadImageNotifyRoutine",     "PspLoadImageNotifyRoutine"    },
-            { "PsSetCreateProcessNotifyRoutineEx",  "PspCreateProcessNotifyRoutine"},
-            { "PsRemoveCreateThreadNotifyRoutine",  "PspCreateThreadNotifyRoutine" },
-        };
-
-        // Get ntoskrnl image size to bound valid RVAs
         MODULEINFO mi{};
         GetModuleInformation(GetCurrentProcess(), hNt, &mi, sizeof(mi));
         uint64_t imageSize = mi.SizeOfImage;
 
+        // LoadImage first; pass its RVA as skipRVA when scanning CreateProcess
+        uint64_t rvaImage = ScanExportForLEA(hNt, "PsRemoveLoadImageNotifyRoutine");
+        uint64_t rvaProc  = ScanExportForLEA(hNt, "PsSetCreateProcessNotifyRoutineEx", rvaImage);
+        uint64_t rvaThr   = ScanExportForLEA(hNt, "PsRemoveCreateThreadNotifyRoutine");
+
+        struct { const char* label; uint64_t rva; } scans[] = {
+            { "PspLoadImageNotifyRoutine",     rvaImage },
+            { "PspCreateProcessNotifyRoutine", rvaProc  },
+            { "PspCreateThreadNotifyRoutine",  rvaThr   },
+        };
+
+        // Also verify all three RVAs are distinct
+        CHECK(rvaImage != rvaProc,  "LoadImage != CreateProcess array");
+        CHECK(rvaImage != rvaThr,   "LoadImage != CreateThread array");
+        CHECK(rvaProc  != rvaThr,   "CreateProcess != CreateThread array");
+
         for (auto& s : scans) {
-            uint64_t rva = ScanExportForLEA(hNt, s.fn);
+            uint64_t rva = s.rva;
             if (rva == 0) {
-                printf("  [FAIL] %s — LEA not found in %s\n", s.label, s.fn);
+                printf("  [FAIL] %s — LEA not found\n", s.label);
                 g_fail++;
                 continue;
             }

