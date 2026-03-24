@@ -1,0 +1,8 @@
+build/*.exe
+build/*.obj
+build/*.pdb
+build/*.ilk
+build/*.exp
+build/*.lib
+*.user
+.vs/
