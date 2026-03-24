@@ -12,3 +12,5 @@ void CmdDisable(unsigned long long addr);   // /disable <addr>
 void CmdEnable (unsigned long long addr);   // /enable  <addr>
 void CmdRunAs(const char* level, const char* cmdline); // /runas system|ti <cmd>
 void CmdEpDump(DWORD pid);                  // /epdump <pid>  (offset probe)
+void CmdNotify(bool doImage, bool doProcess, bool doThread); // /notify [image|process|thread]
+void CmdNotifyDisable(unsigned long long fn);                // /ndisable <addr>

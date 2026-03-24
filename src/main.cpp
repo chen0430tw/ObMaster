@@ -48,6 +48,9 @@ static void Usage(const char* prog) {
         "    /obcb [process|thread] Enumerate ObRegisterCallbacks\n"
         "    /disable <PreOp_addr>  Disable callback (zero PreOp/PostOp, Enabled=0)\n"
         "    /enable  <PreOp_addr>  Set Enabled=1 on matching entry\n\n"
+        "  NotifyRoutines:\n"
+        "    /notify [image|process|thread]  Enumerate Ps*NotifyRoutine arrays\n"
+        "    /ndisable <fn_addr>             Zero EX_CALLBACK slot for matching entry\n\n"
         "  Per-command help:\n"
         "    %s /<command> ?\n\n"
         "Note: Requires RTCore64.sys running. Install via: sc create RTCore64 ...\n",
@@ -286,6 +289,20 @@ int main(int argc, char* argv[]) {
         if (!addrStr) { printf("[!] /enable requires an address\n"); g_drv->Close(); return 1; }
         unsigned long long addr = strtoull(addrStr, nullptr, 16);
         CmdEnable(addr);
+    }
+    else if (_stricmp(cmd, "notify") == 0) {
+        const char* a = nextArg();
+        bool img = true, proc = true, thr = true;
+        if (a && _stricmp(a, "image")   == 0) { proc = false; thr = false; }
+        if (a && _stricmp(a, "process") == 0) { img  = false; thr = false; }
+        if (a && _stricmp(a, "thread")  == 0) { img  = false; proc = false; }
+        CmdNotify(img, proc, thr);
+    }
+    else if (_stricmp(cmd, "ndisable") == 0) {
+        const char* addrStr = nextArg();
+        if (!addrStr) { printf("[!] /ndisable requires an address\n"); g_drv->Close(); return 1; }
+        unsigned long long addr = strtoull(addrStr, nullptr, 16);
+        CmdNotifyDisable(addr);
     }
     else {
         if (g_jsonMode)
