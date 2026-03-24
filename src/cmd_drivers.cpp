@@ -1,7 +1,10 @@
 #include <Windows.h>
 #include <Psapi.h>
 #include <cstdio>
+#include <string>
 #include "kutil.h"
+#include "globals.h"
+#include "jutil.h"
 
 // ─── /drivers ────────────────────────────────────────────────────────────────
 // Lists all loaded kernel modules with base address and file path.
@@ -39,6 +42,24 @@ void CmdDrivers() {
     SetConsoleOutputCP(CP_UTF8);
     KUtil::BuildDriverCache();
     const auto& drivers = KUtil::GetDrivers();
+
+    if (g_jsonMode) {
+        printf("{\"command\":\"drivers\",\"drivers\":[\n");
+        bool first = true;
+        for (auto& d : drivers) {
+            const char* state = SvcState(d.name);
+            if (!first) printf(",\n");
+            first = false;
+            printf(" {\"base\":%s,\"name\":%s,\"scm_state\":%s,\"path\":%s}",
+                JAddr(d.base).c_str(),
+                JEscape(d.name).c_str(),
+                JEscape(state).c_str(),
+                JEscape(d.path).c_str());
+        }
+        printf("\n]}\n");
+        if (s_scm) { CloseServiceHandle(s_scm); s_scm = nullptr; }
+        return;
+    }
 
     printf("\n%-18s %-30s %-10s %s\n", "Base", "Name", "SCM State", "Path");
     printf("%s\n", std::string(120, '-').c_str());

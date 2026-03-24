@@ -1,8 +1,12 @@
 #include <Windows.h>
 #include <cstdio>
 #include <vector>
+#include <string>
 #include "kutil.h"
 #include "driver/IDriverBackend.h"
+#include "globals.h"
+#include "jutil.h"
+#include "ansi.h"
 
 // ─── ObRegisterCallbacks enumeration and control ──────────────────────────────
 //
@@ -67,17 +71,40 @@ static std::vector<ObEntry> ScanType(const char* label, DWORD64 typeVarAddr) {
     return v;
 }
 
+// Returns true if driver name looks like a non-Microsoft security/game product
+static bool IsSuspiciousDriver(const wchar_t* name) {
+    if (!name) return false;
+    static const wchar_t* known_ms[] = {
+        L"ntoskrnl.exe", L"hal.dll", L"WdFilter.sys", L"CI.dll",
+        L"ksecdd.sys",   L"cng.sys", L"VerifierExt.sys", nullptr
+    };
+    for (int i = 0; known_ms[i]; i++)
+        if (_wcsicmp(name, known_ms[i]) == 0) return false;
+    return true;
+}
+
 static void PrintEntry(int idx, const ObEntry& e, const char* typeLabel) {
     char ops[32]{};
     if (e.operations & 1) strcat_s(ops, "CREATE");
     if (e.operations & 2) { if (ops[0]) strcat_s(ops, "|"); strcat_s(ops, "DUPLICATE"); }
 
-    printf("\n  [%d] %-8s  Entry:%p  Enabled:%u  Ops:%s\n",
-        idx, typeLabel, (void*)e.entryAddr, e.enabled, ops);
+    // Color: disabled = dim, suspicious = red, active = yellow
+    const char* entryColor = A_RESET;
+    if (!e.enabled)                                          entryColor = A_DIM;
+    else if (IsSuspiciousDriver(e.preOwner))                 entryColor = A_RED;
+    else                                                     entryColor = A_YELLOW;
+
+    printf("\n  %s[%d]%s %-8s  Entry:%p  Enabled:%s%u%s  Ops:%s\n",
+        A_BOLD, idx, A_RESET,
+        typeLabel, (void*)e.entryAddr,
+        e.enabled ? A_YELLOW : A_DIM, e.enabled, A_RESET,
+        ops);
 
     if (e.preOp)
-        wprintf(L"       Pre : %p  %ls +0x%llx\n",
-            (void*)e.preOp, e.preOwner, (unsigned long long)e.preOwnerOff);
+        wprintf(L"       Pre : %hs%p%hs  %hs%ls%hs +0x%llx\n",
+            entryColor, (void*)e.preOp, A_RESET,
+            entryColor, e.preOwner, A_RESET,
+            (unsigned long long)e.preOwnerOff);
     else
         printf( "       Pre : (none)\n");
 
@@ -94,6 +121,40 @@ void CmdObcb(bool doProcess, bool doThread) {
 
     DWORD64 PsProcessType = KUtil::KernelExport("PsProcessType");
     DWORD64 PsThreadType  = KUtil::KernelExport("PsThreadType");
+
+    if (g_jsonMode) {
+        printf("{\"command\":\"obcb\",\"callbacks\":[\n");
+        bool first = true;
+        auto emit = [&](std::vector<ObEntry>& v, const char* typeLabel) {
+            for (auto& e : v) {
+                char ops[32]{};
+                if (e.operations & 1) strcat_s(ops, "CREATE");
+                if (e.operations & 2) { if (ops[0]) strcat_s(ops, "|"); strcat_s(ops, "DUPLICATE"); }
+                char preOff[32], postOff[32];
+                sprintf_s(preOff,  "0x%llx", (unsigned long long)e.preOwnerOff);
+                sprintf_s(postOff, "0x%llx", (unsigned long long)e.postOwnerOff);
+                if (!first) printf(",\n");
+                first = false;
+                printf(" {\"type\":%s,\"entry\":%s,\"enabled\":%u,\"operations\":%s,"
+                       "\"pre_op\":%s,\"pre_owner\":%s,\"pre_offset\":%s,"
+                       "\"post_op\":%s,\"post_owner\":%s,\"post_offset\":%s}",
+                    JEscape(typeLabel).c_str(),
+                    JAddr(e.entryAddr).c_str(),
+                    (unsigned)e.enabled,
+                    JEscape(ops).c_str(),
+                    JAddr(e.preOp).c_str(),
+                    e.preOp  ? JEscape(e.preOwner).c_str()  : "null",
+                    e.preOp  ? JEscape(preOff).c_str()      : "null",
+                    JAddr(e.postOp).c_str(),
+                    e.postOp ? JEscape(e.postOwner).c_str() : "null",
+                    e.postOp ? JEscape(postOff).c_str()     : "null");
+            }
+        };
+        if (doProcess) { auto v = ScanType("Process", PsProcessType); emit(v, "Process"); }
+        if (doThread)  { auto v = ScanType("Thread",  PsThreadType);  emit(v, "Thread");  }
+        printf("\n]}\n");
+        return;
+    }
 
     int total = 0;
 

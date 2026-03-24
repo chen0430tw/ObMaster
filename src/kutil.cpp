@@ -2,12 +2,17 @@
 #include "driver/IDriverBackend.h"
 #include <Psapi.h>
 #include <algorithm>
+#include <map>
 
 namespace KUtil {
 
 // ─── Kernel export resolution ─────────────────────────────────────────────────
 
 DWORD64 KernelExport(const char* name) {
+    static std::map<std::string, DWORD64> s_cache;
+    auto it = s_cache.find(name);
+    if (it != s_cache.end()) return it->second;
+
     // Get kernel base from EnumDeviceDrivers (drivers[0] == ntoskrnl)
     LPVOID d[1024]; DWORD cb;
     if (!EnumDeviceDrivers(d, sizeof(d), &cb)) return 0;
@@ -18,7 +23,10 @@ DWORD64 KernelExport(const char* name) {
     if (!hNt) return 0;
     DWORD64 offset = (DWORD64)GetProcAddress(hNt, name) - (DWORD64)hNt;
     FreeLibrary(hNt);
-    return kBase + offset;
+
+    DWORD64 va = kBase + offset;
+    s_cache[name] = va;
+    return va;
 }
 
 // ─── Driver name cache ────────────────────────────────────────────────────────
@@ -26,6 +34,9 @@ DWORD64 KernelExport(const char* name) {
 static std::vector<DriverInfo> s_drivers;
 
 void BuildDriverCache() {
+    static bool s_built = false;
+    if (s_built) return;
+    s_built = true;
     s_drivers.clear();
     LPVOID d[1024]; DWORD cb;
     if (!EnumDeviceDrivers(d, sizeof(d), &cb)) return;
@@ -86,9 +97,8 @@ std::vector<ProcessEntry> EnumProcesses() {
             e.name[i] = (char)g_drv->Rd8(cur + EP_ImageFileName + i);
         e.name[15] = 0;
 
-        // PPID: read from the parent process field
-        // InheritedFromUniqueProcessId is at +0x540 on Win10 22H2
-        e.ppid = (DWORD)g_drv->Rd64(cur + 0x540);
+        // PPID: InheritedFromUniqueProcessId at +0x540 on Win10 22H2 x64
+        e.ppid = (DWORD)g_drv->Rd64(cur + EP_InheritedFromUniqueProcessId);
 
         result.push_back(e);
 

@@ -29,14 +29,15 @@ DWORD64 FindDriverByAddr(DWORD64 addr, const wchar_t** outName, DWORD64* outOffs
 // ─── EPROCESS walker (reads kernel memory directly, no OpenProcess) ───────────
 // Win10 22H2 (19045) x64 EPROCESS offsets
 // Verified against: dt nt!_EPROCESS (WinDbg 10.0.26100)
-static const DWORD EP_UniqueProcessId   = 0x440;
-static const DWORD EP_ActiveProcessLinks= 0x448; // LIST_ENTRY
-static const DWORD EP_ImageFileName     = 0x5a8; // UCHAR[15]
-static const DWORD EP_Protection        = 0x87a; // _PS_PROTECTION (1 byte)
-static const DWORD EP_HandleTable       = 0x570; // PHANDLE_TABLE
-static const DWORD EP_ActiveThreads     = 0x5f0; // ULONG
-static const DWORD EP_VadRoot           = 0x7d8; // RTL_AVL_TREE (for WS)
-static const DWORD EP_Peb               = 0x550; // PPEB
+static const DWORD EP_UniqueProcessId            = 0x440;
+static const DWORD EP_ActiveProcessLinks         = 0x448; // LIST_ENTRY
+static const DWORD EP_InheritedFromUniqueProcessId = 0x540; // PPID
+static const DWORD EP_Peb                        = 0x550; // PPEB
+static const DWORD EP_HandleTable                = 0x570; // PHANDLE_TABLE
+static const DWORD EP_ImageFileName              = 0x5a8; // UCHAR[15]
+static const DWORD EP_ActiveThreads              = 0x5f0; // ULONG
+static const DWORD EP_VadRoot                    = 0x7d8; // RTL_AVL_TREE
+static const DWORD EP_Protection                 = 0x87a; // _PS_PROTECTION (1 byte)
 
 struct ProcessEntry {
     DWORD64 eprocess;

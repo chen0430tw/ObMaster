@@ -10,3 +10,5 @@ void CmdNet();                              // /net
 void CmdObcb(bool doProcess, bool doThread);// /obcb [process|thread]
 void CmdDisable(unsigned long long addr);   // /disable <addr>
 void CmdEnable (unsigned long long addr);   // /enable  <addr>
+void CmdRunAs(const char* level, const char* cmdline); // /runas system|ti <cmd>
+void CmdEpDump(DWORD pid);                  // /epdump <pid>  (offset probe)

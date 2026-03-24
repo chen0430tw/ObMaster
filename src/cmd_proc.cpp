@@ -2,8 +2,20 @@
 #include <Psapi.h>
 #include <TlHelp32.h>
 #include <cstdio>
+#include <string>
 #include "kutil.h"
 #include "driver/IDriverBackend.h"
+#include "globals.h"
+#include "jutil.h"
+#include "ansi.h"
+
+static const char* ProtColor(BYTE prot) {
+    if (prot == 0) return "";
+    BYTE type = prot & 0x7;
+    if (type == 2) return A_CYAN;   // PP  (full protected process)
+    if (type == 1) return A_YELLOW; // PPL (protected process light)
+    return A_DIM;
+}
 
 // ─── /proc ───────────────────────────────────────────────────────────────────
 // Enumerate processes via EPROCESS kernel walk (no OpenProcess = no ObCallbacks).
@@ -38,6 +50,34 @@ void CmdProc() {
     SetConsoleOutputCP(CP_UTF8);
     auto procs = KUtil::EnumProcesses();
 
+    if (g_jsonMode) {
+        printf("{\"command\":\"proc\",\"processes\":[\n");
+        bool first = true;
+        for (auto& p : procs) {
+            char integrity[16] = "?";
+            char path[MAX_PATH] = {};
+            HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, p.pid);
+            if (hProc) {
+                DWORD sz = MAX_PATH;
+                QueryFullProcessImageNameA(hProc, 0, path, &sz);
+                GetIntegrity(hProc, integrity, sizeof(integrity));
+                CloseHandle(hProc);
+            }
+            if (!path[0]) strcpy_s(path, p.name);
+            if (!first) printf(",\n");
+            first = false;
+            printf(" {\"pid\":%u,\"ppid\":%u,\"threads\":%u,\"protection\":%s,"
+                   "\"name\":%s,\"integrity\":%s,\"path\":%s}",
+                p.pid, p.ppid, p.activeThreads,
+                JEscape(KUtil::ProtectionStr(p.protection)).c_str(),
+                JEscape(p.name).c_str(),
+                JEscape(integrity).c_str(),
+                JEscape(path).c_str());
+        }
+        printf("\n]}\n");
+        return;
+    }
+
     // Header
     printf("\n%-6s %-6s %-7s %-6s %-16s %-14s %s\n",
         "PID", "PPID", "Threads", "Prot", "Name", "Integrity", "Path");
@@ -47,9 +87,6 @@ void CmdProc() {
         char integrity[16] = "?";
         char path[MAX_PATH] = {};
 
-        // Try opening with minimal rights — won't trigger full ObCallback chain
-        // (PROCESS_QUERY_LIMITED_INFORMATION is a restricted right that most
-        //  security software callbacks don't fully intercept)
         HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, p.pid);
         if (hProc) {
             DWORD sz = MAX_PATH;
@@ -58,13 +95,13 @@ void CmdProc() {
             CloseHandle(hProc);
         }
 
-        // If path empty, fall back to EPROCESS name
         const char* displayName = (path[0] ? strrchr(path, '\\') + 1 : p.name);
         if (!path[0]) strcpy_s(path, p.name);
 
-        printf("%-6u %-6u %-7u %-6s %-16s %-14s %s\n",
+        const char* col = ProtColor(p.protection);
+        printf("%-6u %-6u %-7u %s%-6s%s %-16s %-14s %s\n",
             p.pid, p.ppid, p.activeThreads,
-            KUtil::ProtectionStr(p.protection),
+            col, KUtil::ProtectionStr(p.protection), A_RESET,
             displayName,
             integrity,
             path);

@@ -2,6 +2,8 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+#include "globals.h"
+#include "jutil.h"
 
 // ─── /services ───────────────────────────────────────────────────────────────
 
@@ -62,6 +64,49 @@ void CmdServices(bool allStates) {
 
     auto* entries = (ENUM_SERVICE_STATUS_PROCESSW*)buf.data();
 
+    if (g_jsonMode) {
+        printf("{\"command\":\"services\",\"services\":[\n");
+        bool first = true;
+        for (DWORD i = 0; i < count; i++) {
+            auto& e = entries[i];
+            DWORD state = e.ServiceStatusProcess.dwCurrentState;
+            if (!allStates && state != SERVICE_RUNNING) continue;
+
+            SC_HANDLE hSvc = OpenServiceW(hScm, e.lpServiceName, SERVICE_QUERY_CONFIG);
+            wchar_t binPath[MAX_PATH] = L"";
+            const char* startStr = "?";
+            if (hSvc) {
+                DWORD cfgNeeded = 0;
+                QueryServiceConfigW(hSvc, nullptr, 0, &cfgNeeded);
+                std::vector<BYTE> cfgBuf(cfgNeeded);
+                auto* cfg = (QUERY_SERVICE_CONFIGW*)cfgBuf.data();
+                if (QueryServiceConfigW(hSvc, cfg, cfgNeeded, &cfgNeeded)) {
+                    wcsncpy_s(binPath, cfg->lpBinaryPathName, MAX_PATH-1);
+                    startStr = StartTypeStr(cfg->dwStartType);
+                }
+                CloseServiceHandle(hSvc);
+            }
+
+            DWORD type = e.ServiceStatusProcess.dwServiceType;
+            DWORD pid  = e.ServiceStatusProcess.dwProcessId;
+
+            if (!first) printf(",\n");
+            first = false;
+            printf(" {\"state\":%s,\"type\":%s,\"start\":%s,\"pid\":%u,"
+                   "\"name\":%s,\"display\":%s,\"path\":%s}",
+                JEscape(SvcStateStr(state)).c_str(),
+                JEscape(SvcTypeStr(type)).c_str(),
+                JEscape(startStr).c_str(),
+                pid,
+                JEscape(e.lpServiceName).c_str(),
+                JEscape(e.lpDisplayName).c_str(),
+                JEscape(binPath).c_str());
+        }
+        printf("\n]}\n");
+        CloseServiceHandle(hScm);
+        return;
+    }
+
     printf("\n%-12s %-10s %-9s %-8s %s\n",
         "State", "Type", "Start", "PID", "Name (Display)");
     printf("%s\n", std::string(110, '-').c_str());
@@ -72,27 +117,29 @@ void CmdServices(bool allStates) {
         DWORD state = e.ServiceStatusProcess.dwCurrentState;
         if (!allStates && state != SERVICE_RUNNING) continue;
 
-        // Get binary path via QueryServiceConfig
+        // Get binary path and start type via QueryServiceConfig
         SC_HANDLE hSvc = OpenServiceW(hScm, e.lpServiceName, SERVICE_QUERY_CONFIG);
         wchar_t binPath[MAX_PATH] = L"";
+        const char* startStr = "?";
         if (hSvc) {
             DWORD cfgNeeded = 0;
             QueryServiceConfigW(hSvc, nullptr, 0, &cfgNeeded);
             std::vector<BYTE> cfgBuf(cfgNeeded);
             auto* cfg = (QUERY_SERVICE_CONFIGW*)cfgBuf.data();
-            if (QueryServiceConfigW(hSvc, cfg, cfgNeeded, &cfgNeeded))
+            if (QueryServiceConfigW(hSvc, cfg, cfgNeeded, &cfgNeeded)) {
                 wcsncpy_s(binPath, cfg->lpBinaryPathName, MAX_PATH-1);
+                startStr = StartTypeStr(cfg->dwStartType);
+            }
             CloseServiceHandle(hSvc);
         }
 
-        DWORD type    = e.ServiceStatusProcess.dwServiceType;
-        DWORD pid     = e.ServiceStatusProcess.dwProcessId;
-        DWORD startT  = 0; // filled above if hSvc succeeded
+        DWORD type = e.ServiceStatusProcess.dwServiceType;
+        DWORD pid  = e.ServiceStatusProcess.dwProcessId;
 
         wprintf(L"%-12hs %-10hs %-9hs %-8u %ls  [%ls]\n",
             SvcStateStr(state),
             SvcTypeStr(type),
-            "",          // start type would need separate query
+            startStr,
             pid,
             e.lpServiceName,
             e.lpDisplayName);

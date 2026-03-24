@@ -9,6 +9,8 @@
 #include <map>
 #include <string>
 #include <TlHelp32.h>
+#include "globals.h"
+#include "jutil.h"
 
 // ─── /net ─────────────────────────────────────────────────────────────────────
 // Lists TCP (IPv4+IPv6) and UDP (IPv4+IPv6) connections with owning process name.
@@ -46,14 +48,31 @@ static std::map<DWORD, std::string> BuildPidMap() {
     return m;
 }
 
+// JSON helper — emits one connection record; caller manages commas
+static void EmitConnJson(const char* proto, const char* state,
+                         const char* loc, const char* rem,
+                         DWORD pid, const char* proc, bool& first) {
+    if (!first) printf(",\n");
+    first = false;
+    printf(" {\"proto\":%s,\"state\":%s,\"local\":%s,\"remote\":%s,\"pid\":%u,\"process\":%s}",
+        JEscape(proto).c_str(), JEscape(state).c_str(),
+        JEscape(loc).c_str(),   JEscape(rem).c_str(),
+        pid, JEscape(proc).c_str());
+}
+
 void CmdNet() {
     SetConsoleOutputCP(CP_UTF8);
 
     auto pidMap = BuildPidMap();
 
-    printf("\n%-6s %-13s %-42s %-42s %s\n",
-        "Proto", "State", "Local", "Remote", "PID / Process");
-    printf("%s\n", std::string(130, '-').c_str());
+    if (g_jsonMode) printf("{\"command\":\"net\",\"connections\":[\n");
+    bool jsonFirst = true;
+
+    if (!g_jsonMode) {
+        printf("\n%-6s %-13s %-42s %-42s %s\n",
+            "Proto", "State", "Local", "Remote", "PID / Process");
+        printf("%s\n", std::string(130, '-').c_str());
+    }
 
     // ── TCP IPv4 ──────────────────────────────────────────────────────────────
     DWORD size = 0;
@@ -69,10 +88,12 @@ void CmdNet() {
             FmtIPv4(r.dwLocalAddr,  (USHORT)r.dwLocalPort,  loc, sizeof(loc));
             FmtIPv4(r.dwRemoteAddr, (USHORT)r.dwRemotePort, rem, sizeof(rem));
             auto it = pidMap.find(r.dwOwningPid);
-            printf("%-6s %-13s %-42s %-42s %u / %s\n",
-                "TCP4", TcpStateStr(r.dwState), loc, rem,
-                r.dwOwningPid,
-                it != pidMap.end() ? it->second.c_str() : "?");
+            const char* proc = it != pidMap.end() ? it->second.c_str() : "?";
+            if (g_jsonMode)
+                EmitConnJson("TCP4", TcpStateStr(r.dwState), loc, rem, r.dwOwningPid, proc, jsonFirst);
+            else
+                printf("%-6s %-13s %-42s %-42s %u / %s\n",
+                    "TCP4", TcpStateStr(r.dwState), loc, rem, r.dwOwningPid, proc);
         }
     }
 
@@ -90,10 +111,12 @@ void CmdNet() {
             FmtIPv6(r.ucLocalAddr,  (USHORT)r.dwLocalPort,  loc, sizeof(loc));
             FmtIPv6(r.ucRemoteAddr, (USHORT)r.dwRemotePort, rem, sizeof(rem));
             auto it = pidMap.find(r.dwOwningPid);
-            printf("%-6s %-13s %-42s %-42s %u / %s\n",
-                "TCP6", TcpStateStr(r.dwState), loc, rem,
-                r.dwOwningPid,
-                it != pidMap.end() ? it->second.c_str() : "?");
+            const char* proc = it != pidMap.end() ? it->second.c_str() : "?";
+            if (g_jsonMode)
+                EmitConnJson("TCP6", TcpStateStr(r.dwState), loc, rem, r.dwOwningPid, proc, jsonFirst);
+            else
+                printf("%-6s %-13s %-42s %-42s %u / %s\n",
+                    "TCP6", TcpStateStr(r.dwState), loc, rem, r.dwOwningPid, proc);
         }
     }
 
@@ -110,10 +133,12 @@ void CmdNet() {
             char loc[48];
             FmtIPv4(r.dwLocalAddr, (USHORT)r.dwLocalPort, loc, sizeof(loc));
             auto it = pidMap.find(r.dwOwningPid);
-            printf("%-6s %-13s %-42s %-42s %u / %s\n",
-                "UDP4", "*", loc, "*:*",
-                r.dwOwningPid,
-                it != pidMap.end() ? it->second.c_str() : "?");
+            const char* proc = it != pidMap.end() ? it->second.c_str() : "?";
+            if (g_jsonMode)
+                EmitConnJson("UDP4", "*", loc, "*:*", r.dwOwningPid, proc, jsonFirst);
+            else
+                printf("%-6s %-13s %-42s %-42s %u / %s\n",
+                    "UDP4", "*", loc, "*:*", r.dwOwningPid, proc);
         }
     }
 
@@ -130,12 +155,15 @@ void CmdNet() {
             char loc[72];
             FmtIPv6(r.ucLocalAddr, (USHORT)r.dwLocalPort, loc, sizeof(loc));
             auto it = pidMap.find(r.dwOwningPid);
-            printf("%-6s %-13s %-42s %-42s %u / %s\n",
-                "UDP6", "*", loc, "*:*",
-                r.dwOwningPid,
-                it != pidMap.end() ? it->second.c_str() : "?");
+            const char* proc = it != pidMap.end() ? it->second.c_str() : "?";
+            if (g_jsonMode)
+                EmitConnJson("UDP6", "*", loc, "*:*", r.dwOwningPid, proc, jsonFirst);
+            else
+                printf("%-6s %-13s %-42s %-42s %u / %s\n",
+                    "UDP6", "*", loc, "*:*", r.dwOwningPid, proc);
         }
     }
 
-    printf("\n");
+    if (g_jsonMode) printf("\n]}\n");
+    else printf("\n");
 }
