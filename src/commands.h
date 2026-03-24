@@ -17,3 +17,5 @@ void CmdNotifyDisable(unsigned long long fn);                // /ndisable <addr>
 void CmdMemScan(DWORD pid, bool showAll = false);            // /memscan <pid> [all]
 void CmdMemRestore(DWORD pid, const char* dll,
                    const char* section = nullptr);           // /memrestore <pid> <dll> [section]
+void CmdWatchFix(const char* proc, const char* dll,
+                 const char* section = nullptr);             // /watchfix <proc.exe> <dll> [section]

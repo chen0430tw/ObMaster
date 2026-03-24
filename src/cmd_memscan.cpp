@@ -346,3 +346,62 @@ void CmdMemRestore(DWORD pid, const char* dllFilter, const char* sectionFilter)
 
     CloseHandle(hProc);
 }
+
+// ─── /watchfix ───────────────────────────────────────────────────────────────
+//
+// Poll for every new instance of <procName>, then immediately run CmdMemRestore
+// on it before VBox's hardening self-check fires.
+//
+// Usage: /watchfix <process.exe> <dll> [section]
+//   e.g. /watchfix VirtualBoxVM.exe ntdll.dll .00cfg
+//
+// Press Ctrl-C to stop.
+
+void CmdWatchFix(const char* procName, const char* dllFilter, const char* sectionFilter)
+{
+    wchar_t wTarget[MAX_PATH];
+    MultiByteToWideChar(CP_UTF8, 0, procName, -1, wTarget, MAX_PATH);
+
+    printf("[*] Watching for %s%s%s — will restore %s%s%s [%s] on each new instance\n",
+           A_YELLOW, procName, A_RESET,
+           A_CYAN, dllFilter, A_RESET,
+           sectionFilter ? sectionFilter : "non-noisy sections");
+    printf("    Press Ctrl-C to stop.\n\n");
+
+    std::vector<DWORD> fixed;
+
+    while (true) {
+        HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (hSnap == INVALID_HANDLE_VALUE) { Sleep(100); continue; }
+
+        PROCESSENTRY32W pe;
+        pe.dwSize = sizeof(pe);
+        if (Process32FirstW(hSnap, &pe)) {
+            do {
+                if (_wcsicmp(pe.szExeFile, wTarget) != 0) continue;
+                DWORD pid = pe.th32ProcessID;
+
+                bool seen = false;
+                for (DWORD p : fixed) if (p == pid) { seen = true; break; }
+                if (seen) continue;
+
+                printf("[+] New %s%s%s  PID=%lu  -> patching...\n",
+                       A_YELLOW, procName, A_RESET, pid);
+
+                Sleep(20);  // let the process load ntdll
+
+                CmdMemRestore(pid, dllFilter, sectionFilter);
+                fixed.push_back(pid);
+
+                printf("  [*] Post-fix scan:\n");
+                CmdMemScan(pid, false);
+
+            } while (Process32NextW(hSnap, &pe));
+        }
+        CloseHandle(hSnap);
+
+        if (fixed.size() > 256) fixed.erase(fixed.begin(), fixed.begin() + 128);
+
+        Sleep(50);
+    }
+}
