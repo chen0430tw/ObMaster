@@ -32,6 +32,15 @@ Process inspection, PPL bypass, privilege escalation, service/driver enumeration
 | `/disable <addr>` | Disable callback (zero PreOp/PostOp, set Enabled=0) |
 | `/enable <addr>` | Re-enable callback entry (set Enabled=1) |
 
+### NotifyRoutines
+
+| Command | Description |
+|---|---|
+| `/notify [image\|process\|thread]` | Enumerate `Ps*NotifyRoutine` arrays (LoadImage / CreateProcess / CreateThread) |
+| `/ndisable <fn_addr>` | Zero the `EX_CALLBACK` slot for the matching entry — **⚠ BSOD risk, see below** |
+
+> **⚠ BSOD warning — `/ndisable`:** Zeroing a notify slot while the kernel or another driver holds a rundown reference to that `EX_CALLBACK_ROUTINE_BLOCK` can cause an immediate bugcheck. Always enumerate first with `/notify`, identify the target, then disable during a quiet window (no active callbacks in flight). Never use on `ntoskrnl.exe` or `WdFilter.sys` entries.
+
 ### Global flags
 | Flag | Description |
 |---|---|
