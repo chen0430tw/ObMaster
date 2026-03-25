@@ -1,0 +1,27 @@
+[*] Building...
+main.cpp
+kutil.cpp
+RTCore64Backend.cpp
+cmd_proc.cpp
+cmd_drivers.cpp
+cmd_services.cpp
+cmd_net.cpp
+cmd_obcb.cpp
+cmd_runas.cpp
+cmd_epdump.cpp
+cmd_notify.cpp
+cmd_memscan.cpp
+cmd_handles.cpp
+D:\ObMaster\src\cmd_handles.cpp(150): error C2665: “JEscape”: 没有重载函数可以转换所有参数类型
+D:\ObMaster\src\jutil.h(32): note: 可能是“std::string JEscape(const wchar_t *)”
+D:\ObMaster\src\cmd_handles.cpp(150): note: “std::string JEscape(const wchar_t *)”: 无法将参数 1 从“std::basic_string<char,std::char_traits<char>,std::allocator<char>>”转换为“const wchar_t *”
+D:\ObMaster\src\cmd_handles.cpp(150): note: 没有可用于执行该转换的用户定义的转换运算符，或者无法调用该运算符
+D:\ObMaster\src\jutil.h(9): note: 或    “std::string JEscape(const char *)”
+D:\ObMaster\src\cmd_handles.cpp(150): note: “std::string JEscape(const char *)”: 无法将参数 1 从“std::basic_string<char,std::char_traits<char>,std::allocator<char>>”转换为“const char *”
+D:\ObMaster\src\cmd_handles.cpp(150): note: 没有可用于执行该转换的用户定义的转换运算符，或者无法调用该运算符
+D:\ObMaster\src\cmd_handles.cpp(150): note: 尝试匹配参数列表“(std::basic_string<char,std::char_traits<char>,std::allocator<char>>)”时
+D:\ObMaster\src\cmd_handles.cpp(149): warning C4473: “printf”: 没有为格式字符串传递足够的参数
+D:\ObMaster\src\cmd_handles.cpp(149): note: 占位符和其参数预计 1 可变参数，但提供的却是 0 参数
+D:\ObMaster\src\cmd_handles.cpp(149): note: 缺失的可变参数 1 为格式字符串“%s”所需
+正在生成代码...
+[!] Build FAILED, errorlevel=2

@@ -28,6 +28,12 @@ cl.exe /nologo /O2 /MT /EHsc /std:c++17 /utf-8 ^
     "%SRC%\cmd_memscan.cpp" ^
     "%SRC%\cmd_handles.cpp" ^
     "%SRC%\cmd_flt.cpp" ^
+    "%SRC%\cmd_patch.cpp" ^
+    "%SRC%\pte.cpp" ^
+    "%SRC%\patch_store.cpp" ^
+    "%SRC%\cmd_safepatch.cpp" ^
+    "%SRC%\cmd_timedelta.cpp" ^
+    "%SRC%\cmd_guard.cpp" ^
     /Fe:"%OUT%" ^
     /link advapi32.lib psapi.lib iphlpapi.lib ws2_32.lib fltlib.lib setupapi.lib cfgmgr32.lib
 

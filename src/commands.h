@@ -26,3 +26,11 @@ void CmdHandles(const char* filter);                        // /handles [drive]
 void CmdFlt(const char* volume);                            // /flt [drive]
 void CmdFltDetach(const char* filter, const char* volume);  // /flt-detach <f> <v>
 void CmdUnmount(char drive);                                // /unmount <drive>
+void CmdPatch(unsigned long long addr, const char* hexBytes); // /patch <addr> <hexbytes>  (legacy, unsafe)
+void CmdSafePatch(DWORD64 addr, const char* hexStr);         // /safepatch <addr> <hex>   (shadow page)
+void CmdSafePatchRestore(DWORD64 addr);                      // /restore <addr>
+void CmdTimeDelta(DWORD targetPid, int durationMs);          // /timedelta <pid> [ms]
+void CmdGuardAdd(DWORD64 addr);                              // /guard-add <addr>
+void CmdGuardStart(int intervalMs);                          // /guard-start [ms]
+void CmdGuardStop();                                         // /guard-stop
+void CmdGuardList();                                         // /guard-list

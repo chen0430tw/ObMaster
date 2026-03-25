@@ -1,6 +1,8 @@
+#define NOMINMAX
 #include <Windows.h>
 #include <cstdio>
 #include <cstring>
+#include "kutil.h"
 #include "driver/IDriverBackend.h"
 #include "driver/RTCore64Backend.h"
 #include "commands.h"
@@ -49,6 +51,16 @@ static void Usage(const char* prog) {
         "  ObCallbacks:\n"
         "    /obcb [process|thread] Enumerate ObRegisterCallbacks\n"
         "    /disable <PreOp_addr>  Disable callback (zero PreOp/PostOp, Enabled=0)\n"
+        "    /patch <addr> <hex>         Write raw bytes (legacy, unsafe — byte-by-byte)\n"
+        "    /safepatch <addr> <hex>     Safe patch via shadow-page PTE swap\n"
+        "    /restore <addr>             Undo a safepatch (restore original PTE)\n\n"
+        "  Timing:\n"
+        "    /timedelta <pid> [ms]       Measure transient System handles to <pid>\n\n"
+        "  Guard watchdog:\n"
+        "    /guard-add <addr>           Watch safepatch at <addr>, re-apply if reverted\n"
+        "    /guard-start [interval_ms]  Start background watchdog (default 500ms)\n"
+        "    /guard-stop                 Stop watchdog\n"
+        "    /guard-list                 List guarded patches\n"
         "    /enable  <PreOp_addr>  Set Enabled=1 on matching entry\n\n"
         "  NotifyRoutines:\n"
         "    /notify [image|process|thread]  Enumerate Ps*NotifyRoutine arrays\n"
@@ -304,6 +316,59 @@ int main(int argc, char* argv[]) {
         if (!addrStr) { printf("[!] /disable requires an address\n"); g_drv->Close(); return 1; }
         unsigned long long addr = strtoull(addrStr, nullptr, 16);
         CmdDisable(addr);
+    }
+    else if (_stricmp(cmd, "patch") == 0) {
+        const char* addrStr  = nextArg(0);
+        const char* hexBytes = nextArg(1);
+        if (!addrStr || !hexBytes) {
+            printf("[!] Usage: /patch <hex_addr> <hexbytes>  e.g. /patch FFFFF80127ED31B4 33C0C390\n");
+            g_drv->Close(); return 1;
+        }
+        unsigned long long addr = strtoull(addrStr, nullptr, 16);
+        CmdPatch(addr, hexBytes);
+    }
+    else if (_stricmp(cmd, "safepatch") == 0) {
+        const char* addrStr  = nextArg(0);
+        const char* hexBytes = nextArg(1);
+        if (!addrStr || !hexBytes) {
+            printf("[!] Usage: /safepatch <hex_addr> <hexbytes>\n");
+            g_drv->Close(); return 1;
+        }
+        KUtil::BuildDriverCache();
+        CmdSafePatch(strtoull(addrStr, nullptr, 16), hexBytes);
+    }
+    else if (_stricmp(cmd, "restore") == 0) {
+        const char* addrStr = nextArg();
+        if (!addrStr) { printf("[!] /restore requires an address\n"); g_drv->Close(); return 1; }
+        CmdSafePatchRestore(strtoull(addrStr, nullptr, 16));
+    }
+    else if (_stricmp(cmd, "timedelta") == 0) {
+        const char* pidStr  = nextArg(0);
+        const char* durStr  = nextArg(1);
+        if (!pidStr) { printf("[!] /timedelta requires a PID\n"); g_drv->Close(); return 1; }
+        CmdTimeDelta((DWORD)strtoul(pidStr, nullptr, 10),
+                     durStr ? (int)strtoul(durStr, nullptr, 10) : 3000);
+    }
+    else if (_stricmp(cmd, "guard-add") == 0) {
+        const char* addrStr = nextArg();
+        if (!addrStr) { printf("[!] /guard-add requires an address\n"); g_drv->Close(); return 1; }
+        KUtil::BuildDriverCache();
+        CmdGuardAdd(strtoull(addrStr, nullptr, 16));
+    }
+    else if (_stricmp(cmd, "guard-start") == 0) {
+        const char* msStr = nextArg(0);
+        CmdGuardStart(msStr ? (int)strtoul(msStr, nullptr, 10) : 500);
+        // Keep process alive until user presses Enter
+        printf("  Press Enter to stop guard and exit...\n");
+        getchar();
+        CmdGuardStop();
+    }
+    else if (_stricmp(cmd, "guard-stop") == 0) {
+        CmdGuardStop();
+    }
+    else if (_stricmp(cmd, "guard-list") == 0) {
+        KUtil::BuildDriverCache();
+        CmdGuardList();
     }
     else if (_stricmp(cmd, "runas") == 0) {
         const char* lvl = nextArg(0);
