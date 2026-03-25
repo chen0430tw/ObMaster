@@ -1,0 +1,411 @@
+            ; CALL XREF from fcn.140007938 @ 0x14000794e(x)
+┌ 259: fcn.1400074fc ();
+│ afv: vars(3:sp[0x30..0x110])
+│           0x1400074fc      488bc4         mov rax, rsp
+│           0x1400074ff      48895808       mov qword [rax + 8], rbx
+│           0x140007503      48897010       mov qword [rax + 0x10], rsi
+│           0x140007507      48897818       mov qword [rax + 0x18], rdi
+│           0x14000750b      55             push rbp
+│           0x14000750c      488d68a1       lea rbp, [rax - 0x5f]
+│           0x140007510      4881ec0001..   sub rsp, 0x100
+│           0x140007517      488b055a4b..   mov rax, qword [0x14000c078] ; [0x14000c078:8]=0x2b992ddfa232
+│           0x14000751e      4833c4         xor rax, rsp
+│           0x140007521      48894547       mov qword [rbp + 0x47], rax
+│           0x140007525      33d2           xor edx, edx
+│           0x140007527      488d4d99       lea rcx, [rbp - 0x67]
+│           0x14000752b      448d4226       lea r8d, [rdx + 0x26]
+│           0x14000752f      e8cc260000     call fcn.140009c00
+│           0x140007534      33ff           xor edi, edi
+│           0x140007536      33c0           xor eax, eax
+│           0x140007538      488d4dc9       lea rcx, [rbp - 0x37]
+│           0x14000753c      448d477e       lea r8d, [rdi + 0x7e]
+│           0x140007540      33d2           xor edx, edx
+│           0x140007542      48897c2420     mov qword [var_20h], rdi
+│           0x140007547      4889442428     mov qword [var_28h], rax
+│           0x14000754c      48894587       mov qword [rbp - 0x79], rax
+│           0x140007550      4889458f       mov qword [rbp - 0x71], rax
+│           0x140007554      66897dc7       mov word [rbp - 0x39], di
+│           0x140007558      e8a3260000     call fcn.140009c00
+│           0x14000755d      8bdf           mov ebx, edi
+│           0x14000755f      8d7701         lea esi, [rdi + 1]
+│           ; CODE XREF from fcn.1400074fc @ 0x1400075d8(x)
+│       ┌─> 0x140007562      488d442420     lea rax, [var_20h]
+│       ╎   0x140007567      448d8b01e2..   lea r9d, [rbx + 0x4e201]
+│       ╎   0x14000756e      4c8d054b30..   lea r8, [0x14000a5c0]      ; "%d" ; int64_t arg3
+│       ╎   0x140007575      488d4dc7       lea rcx, [rbp - 0x39]      ; int64_t arg1
+│       ╎   0x140007579      ba80000000     mov edx, 0x80              ; 128 ; int64_t arg2
+│       ╎   0x14000757e      c745970001..   mov dword [rbp - 0x69], 0x10100
+│       ╎   0x140007585      488945b7       mov qword [rbp - 0x49], rax
+│       ╎   0x140007589      48897daf       mov qword [rbp - 0x51], rdi
+│       ╎   0x14000758d      e886020000     call fcn.140007818
+│       ╎   0x140007592      488d55c7       lea rdx, [rbp - 0x39]
+│       ╎   0x140007596      488d4d9f       lea rcx, [rbp - 0x61]
+│       ╎   0x14000759a      ff15203b0000   call qword [sym.imp.ntoskrnl.exe_RtlInitUnicodeString] ; [0x14000b0c0:8]=0x175b8 reloc.ntoskrnl.exe_RtlInitUnicodeString
+│       ╎   0x1400075a0      488b05113d..   mov rax, qword [sym.imp.ntoskrnl.exe_PsProcessType] ; [0x14000b2b8:8]=0x17b82 reloc.ntoskrnl.exe_PsProcessType
+│       ╎   0x1400075a7      488d15a2e4..   lea rdx, [0x140015a50]
+│       ╎   0x1400075ae      4889442420     mov qword [var_20h], rax
+│       ╎   0x1400075b3      488d05fe02..   lea rax, [0x1400078b8]
+│       ╎   0x1400075ba      488d4d97       lea rcx, [rbp - 0x69]
+│       ╎   0x1400075be      48894587       mov qword [rbp - 0x79], rax
+│       ╎   0x1400075c2      89742428       mov dword [var_28h], esi
+│       ╎   0x1400075c6      ff15cc3c0000   call qword [sym.imp.ntoskrnl.exe_ObRegisterCallbacks] ; [0x14000b298:8]=0x17b20 reloc.ntoskrnl.exe_ObRegisterCallbacks ; " {\x01"
+│       ╎   0x1400075cc      3d11001cc0     cmp eax, 0xc01c0011        ; '\x11'
+│      ┌──< 0x1400075d1      7507           jne 0x1400075da
+│      │╎   0x1400075d3      03de           add ebx, esi
+│      │╎   0x1400075d5      83fb0a         cmp ebx, 0xa               ; 10
+│      │└─< 0x1400075d8      7c88           jl 0x140007562
+│      │    ; CODE XREF from fcn.1400074fc @ 0x1400075d1(x)
+│      └──> 0x1400075da      488b4d47       mov rcx, qword [rbp + 0x47]
+│           0x1400075de      4833cc         xor rcx, rsp
+│           0x1400075e1      e86a220000     call fcn.140009850
+│           0x1400075e6      4c8d9c2400..   lea r11, [var_100h]
+│           0x1400075ee      498b5b10       mov rbx, qword [r11 + 0x10]
+│           0x1400075f2      498b7318       mov rsi, qword [r11 + 0x18]
+│           0x1400075f6      498b7b20       mov rdi, qword [r11 + 0x20]
+│           0x1400075fa      498be3         mov rsp, r11
+│           0x1400075fd      5d             pop rbp
+└           0x1400075fe      c3             ret
+            ; DATA XREF from fcn.1400074fc @ 0x1400075b3(r)
+┌ 128: fcn.1400078b8 (int64_t arg1);
+│ `- args(rdx)
+│           0x1400078b8      4053           push rbx
+│           0x1400078ba      4883ec20       sub rsp, 0x20
+│           0x1400078be      8b4204         mov eax, dword [rdx + 4]   ; arg2
+│           0x1400078c1      488bda         mov rbx, rdx               ; arg2
+│           0x1400078c4      a801           test al, 1                 ; 1
+│       ┌─< 0x1400078c6      7568           jne 0x140007930
+│       │   0x1400078c8      440f20c0       mov rax, cr8
+│       │   0x1400078cc      3c02           cmp al, 2                  ; 2
+│      ┌──< 0x1400078ce      7360           jae 0x140007930
+│      ││   0x1400078d0      488b4a08       mov rcx, qword [rdx + 8]   ; arg2
+│      ││   0x1400078d4      ff15d6390000   call qword [sym.imp.ntoskrnl.exe_PsGetProcessId] ; [0x14000b2b0:8]=0x17b70 reloc.ntoskrnl.exe_PsGetProcessId ; "p{\x01"
+│      ││   0x1400078da      833b01         cmp dword [rbx], 1
+│     ┌───< 0x1400078dd      7551           jne 0x140007930
+│     │││   0x1400078df      488b4b20       mov rcx, qword [rbx + 0x20]
+│     │││   0x1400078e3      8b5104         mov edx, dword [rcx + 4]
+│     │││   0x1400078e6      f6c201         test dl, 1                 ; 1
+│    ┌────< 0x1400078e9      7445           je 0x140007930
+│    ││││   0x1400078eb      488bc8         mov rcx, rax
+│    ││││   0x1400078ee      e80dfdffff     call fcn.140007600
+│    ││││   0x1400078f3      84c0           test al, al
+│   ┌─────< 0x1400078f5      7439           je 0x140007930
+│   │││││   0x1400078f7      488b4320       mov rax, qword [rbx + 0x20]
+│   │││││   0x1400078fb      8b4804         mov ecx, dword [rax + 4]
+│   │││││   0x1400078fe      f6c101         test cl, 1                 ; 1
+│  ┌──────< 0x140007901      7403           je 0x140007906
+│  ││││││   0x140007903      8320fe         and dword [rax], 0xfffffffe ; [0xfffffffe:4]=-1 ; 4294967294
+│  ││││││   ; CODE XREF from fcn.1400078b8 @ 0x140007901(x)
+│  └──────> 0x140007906      f6c108         test cl, 8                 ; 8
+│  ┌──────< 0x140007909      7403           je 0x14000790e
+│  ││││││   0x14000790b      8320f7         and dword [rax], 0xfffffff7 ; [0xfffffff7:4]=-1 ; 4294967287
+│  ││││││   ; CODE XREF from fcn.1400078b8 @ 0x140007909(x)
+│  └──────> 0x14000790e      f6c110         test cl, 0x10              ; 16
+│  ┌──────< 0x140007911      7403           je 0x140007916
+│  ││││││   0x140007913      8320ef         and dword [rax], 0xffffffef ; [0xffffffef:4]=-1 ; 4294967279
+│  ││││││   ; CODE XREF from fcn.1400078b8 @ 0x140007911(x)
+│  └──────> 0x140007916      8b08           mov ecx, dword [rax]
+│   │││││   0x140007918      f6c120         test cl, 0x20              ; 32
+│  ┌──────< 0x14000791b      7405           je 0x140007922
+│  ││││││   0x14000791d      83e1df         and ecx, 0xffffffdf        ; 4294967263
+│  ││││││   0x140007920      8908           mov dword [rax], ecx
+│  ││││││   ; CODE XREF from fcn.1400078b8 @ 0x14000791b(x)
+│  └──────> 0x140007922      8b08           mov ecx, dword [rax]
+│   │││││   0x140007924      0fbae10b       bt ecx, 0xb
+│  ┌──────< 0x140007928      7306           jae 0x140007930
+│  ││││││   0x14000792a      0fbaf10b       btr ecx, 0xb
+│  ││││││   0x14000792e      8908           mov dword [rax], ecx
+│  ││││││   ; XREFS: CODE 0x1400078c6  CODE 0x1400078ce  CODE 0x1400078dd  
+│  ││││││   ; XREFS: CODE 0x1400078e9  CODE 0x1400078f5  CODE 0x140007928  
+│  └└└└└└─> 0x140007930      33c0           xor eax, eax
+│           0x140007932      4883c420       add rsp, 0x20
+│           0x140007936      5b             pop rbx
+└           0x140007937      c3             ret
+            ; CALL XREF from fcn.140007600 @ 0x14000772f(x)
+┌ 296: fcn.140005860 (int64_t arg1, int64_t arg2);
+│ `- args(rcx, rdx) vars(10:sp[0x10..0xe0])
+│           0x140005860      48895c2418     mov qword [var_18h], rbx
+│           0x140005865      56             push rsi
+│           0x140005866      57             push rdi
+│           0x140005867      4156           push r14
+│           0x140005869      4881ecc000..   sub rsp, 0xc0
+│           0x140005870      488b050168..   mov rax, qword [0x14000c078] ; [0x14000c078:8]=0x2b992ddfa232
+│           0x140005877      4833c4         xor rax, rsp
+│           0x14000587a      48898424b0..   mov qword [var_b0h], rax
+│           0x140005882      488bf2         mov rsi, rdx               ; arg2
+│           0x140005885      488bf9         mov rdi, rcx               ; arg1
+│           0x140005888      4533f6         xor r14d, r14d
+│           0x14000588b      4c89742440     mov qword [var_40h], r14
+│           0x140005890      488d442440     lea rax, [var_40h]
+│           0x140005895      4889442430     mov qword [var_30h], rax
+│           0x14000589a      4488742428     mov byte [var_28h], r14b
+│           0x14000589f      4c89742420     mov qword [var_20h], r14
+│           0x1400058a4      4533c9         xor r9d, r9d
+│           0x1400058a7      4533c0         xor r8d, r8d
+│           0x1400058aa      ba00020000     mov edx, 0x200             ; 512
+│           0x1400058af      ff158b590000   call qword [sym.imp.ntoskrnl.exe_ObOpenObjectByPointer] ; [0x14000b240:8]=0x17a0e reloc.ntoskrnl.exe_ObOpenObjectByPointer
+│           0x1400058b5      85c0           test eax, eax
+│       ┌─< 0x1400058b7      0f88a9000000   js 0x140005966
+│       │   0x1400058bd      4c89742420     mov qword [var_20h], r14
+│       │   0x1400058c2      458d4e30       lea r9d, [r14 + 0x30]
+│       │   0x1400058c6      4c8d442450     lea r8, [var_50h]
+│       │   0x1400058cb      33d2           xor edx, edx
+│       │   0x1400058cd      488b4c2440     mov rcx, qword [var_40h]
+│       │   0x1400058d2      ff1580590000   call qword [sym.imp.ntoskrnl.exe_ZwQueryInformationProcess] ; [0x14000b258:8]=0x17a56 reloc.ntoskrnl.exe_ZwQueryInformationProcess ; "Vz\x01"
+│       │   0x1400058d8      8bd8           mov ebx, eax
+│       │   0x1400058da      85c0           test eax, eax
+│      ┌──< 0x1400058dc      7876           js 0x140005954
+│      ││   0x1400058de      488d942480..   lea rdx, [var_80h]
+│      ││   0x1400058e6      488bcf         mov rcx, rdi
+│      ││   0x1400058e9      ff1541590000   call qword [sym.imp.ntoskrnl.exe_KeStackAttachProcess] ; [0x14000b230:8]=0x179dc reloc.ntoskrnl.exe_KeStackAttachProcess
+│      ││   0x1400058ef      90             nop
+│      ││   0x1400058f0      488b4c2458     mov rcx, qword [var_58h]
+│      ││   0x1400058f5      4885c9         test rcx, rcx
+│     ┌───< 0x1400058f8      743f           je 0x140005939
+│     │││   0x1400058fa      488b4920       mov rcx, qword [rcx + 0x20]
+│     │││   0x1400058fe      4885c9         test rcx, rcx
+│    ┌────< 0x140005901      7436           je 0x140005939
+│    ││││   0x140005903      488b5168       mov rdx, qword [rcx + 0x68]
+│    ││││   0x140005907      4885d2         test rdx, rdx
+│   ┌─────< 0x14000590a      742d           je 0x140005939
+│   │││││   0x14000590c      440fb74160     movzx r8d, word [rcx + 0x60]
+│   │││││   0x140005911      664585c0       test r8w, r8w
+│  ┌──────< 0x140005915      7422           je 0x140005939
+│  ││││││   0x140005917      8b4108         mov eax, dword [rcx + 8]
+│  ││││││   0x14000591a      a801           test al, 1                 ; 1
+│ ┌───────< 0x14000591c      7503           jne 0x140005921
+│ │││││││   0x14000591e      4803d1         add rdx, rcx
+│ │││││││   ; CODE XREF from fcn.140005860 @ 0x14000591c(x)
+│ └───────> 0x140005921      488bce         mov rcx, rsi
+│  ││││││   0x140005924      e843f0ffff     call fcn.14000496c
+│  ││││││   0x140005929      f6d8           neg al
+│  ││││││   0x14000592b      1bdb           sbb ebx, ebx
+│  ││││││   0x14000592d      f7d3           not ebx
+│  ││││││   0x14000592f      81e3010000c0   and ebx, 0xc0000001
+│  ││││││   0x140005935      895c2448       mov dword [var_48h], ebx
+│  ││││││   ; CODE XREFS from fcn.140005860 @ 0x1400058f8(x), 0x140005901(x), 0x14000590a(x), 0x140005915(x)
+│ ┌└└└└───> 0x140005939      eb09           jmp 0x140005944
+..
+│ │    ││   ; CODE XREF from fcn.140005860 @ 0x140005939(x)
+│ └───────> 0x140005944      488d8c2480..   lea rcx, [var_80h]
+│      ││   0x14000594c      ff15e6580000   call qword [sym.imp.ntoskrnl.exe_KeUnstackDetachProcess] ; [0x14000b238:8]=0x179f4 reloc.ntoskrnl.exe_KeUnstackDetachProcess
+│     ┌───< 0x140005952      eb05           jmp 0x140005959
+│     │││   ; CODE XREF from fcn.140005860 @ 0x1400058dc(x)
+│     │└──> 0x140005954      bb010000c0     mov ebx, 0xc0000001
+│     │ │   ; CODE XREF from fcn.140005860 @ 0x140005952(x)
+│     └───> 0x140005959      488b4c2440     mov rcx, qword [var_40h]
+│       │   0x14000595e      ff154c570000   call qword [sym.imp.ntoskrnl.exe_ZwClose] ; [0x14000b0b0:8]=0x1759a reloc.ntoskrnl.exe_ZwClose
+│      ┌──< 0x140005964      eb05           jmp 0x14000596b
+│      ││   ; CODE XREF from fcn.140005860 @ 0x1400058b7(x)
+│      │└─> 0x140005966      bb010000c0     mov ebx, 0xc0000001
+│      │    ; CODE XREF from fcn.140005860 @ 0x140005964(x)
+│      └──> 0x14000596b      8bc3           mov eax, ebx
+│           0x14000596d      488b8c24b0..   mov rcx, qword [var_b0h]
+│           0x140005975      4833cc         xor rcx, rsp
+│           0x140005978      e8d33e0000     call fcn.140009850
+│           0x14000597d      488b9c24f0..   mov rbx, qword [var_18h]
+│           0x140005985      4881c4c000..   add rsp, 0xc0
+│           0x14000598c      415e           pop r14
+│           0x14000598e      5f             pop rdi
+│           0x14000598f      5e             pop rsi
+└           0x140005990      c3             ret
+            ; CALL XREF from fcn.1400015a8 @ +0x34b(x)
+            ; CALL XREF from fcn.140001cdc @ 0x140001d19(x)
+            ; CALL XREF from fcn.1400031b4 @ 0x1400031c9(x)
+            ; CALL XREF from fcn.140007600 @ 0x1400076e0(x)
+┌ 233: fcn.140004bcc (int64_t arg1);
+│ `- args(rcx) vars(7:sp[0x8..0x50])
+│           0x140004bcc      48895c2418     mov qword [var_18h], rbx
+│           0x140004bd1      4889742420     mov qword [var_20h], rsi
+│           0x140004bd6      57             push rdi
+│           0x140004bd7      4883ec40       sub rsp, 0x40
+│           0x140004bdb      33f6           xor esi, esi
+│           0x140004bdd      c744245010..   mov dword [var_50h], 0x210 ; [0x210:4]=-1 ; 528
+│           0x140004be5      4885c9         test rcx, rcx              ; arg1
+│       ┌─< 0x140004be8      7507           jne 0x140004bf1
+│       │   ; CODE XREFS from fcn.140004bcc @ 0x140004c18(x), 0x140004c40(x), 0x140004c9d(x)
+│    ┌┌┌──> 0x140004bea      33c0           xor eax, eax
+│   ┌─────< 0x140004bec      e9b4000000     jmp 0x140004ca5
+│   │╎╎╎│   ; CODE XREF from fcn.140004bcc @ 0x140004be8(x)
+│   │╎╎╎└─> 0x140004bf1      488d442458     lea rax, [var_58h]
+│   │╎╎╎    0x140004bf6      4533c9         xor r9d, r9d
+│   │╎╎╎    0x140004bf9      4533c0         xor r8d, r8d
+│   │╎╎╎    0x140004bfc      4889442430     mov qword [var_30h], rax
+│   │╎╎╎    0x140004c01      ba00020000     mov edx, 0x200             ; 512
+│   │╎╎╎    0x140004c06      4088742428     mov byte [var_28h], sil
+│   │╎╎╎    0x140004c0b      4889742420     mov qword [var_20h_2], rsi
+│   │╎╎╎    0x140004c10      ff152a660000   call qword [sym.imp.ntoskrnl.exe_ObOpenObjectByPointer] ; [0x14000b240:8]=0x17a0e reloc.ntoskrnl.exe_ObOpenObjectByPointer
+│   │╎╎╎    0x140004c16      85c0           test eax, eax
+│   │└────< 0x140004c18      78d0           js 0x140004bea
+│   │ ╎╎    0x140004c1a      4863542450     movsxd rdx, dword [var_50h]
+│   │ ╎╎    0x140004c1f      33c9           xor ecx, ecx
+│   │ ╎╎    0x140004c21      41b865677865   mov r8d, 0x65786765        ; 'egxe'
+│   │ ╎╎    0x140004c27      ff152b640000   call qword [sym.imp.ntoskrnl.exe_ExAllocatePoolWithTag] ; [0x14000b058:8]=0x174b4 reloc.ntoskrnl.exe_ExAllocatePoolWithTag
+│   │ ╎╎    0x140004c2d      488bf8         mov rdi, rax
+│   │ ╎╎    0x140004c30      4885c0         test rax, rax
+│   │ ╎╎┌─< 0x140004c33      750d           jne 0x140004c42
+│   │ ╎╎│   0x140004c35      488b4c2458     mov rcx, qword [var_58h]
+│   │ ╎╎│   0x140004c3a      ff1570640000   call qword [sym.imp.ntoskrnl.exe_ZwClose] ; [0x14000b0b0:8]=0x1759a reloc.ntoskrnl.exe_ZwClose
+│   │ └───< 0x140004c40      eba8           jmp 0x140004bea
+│   │  ╎│   ; CODE XREF from fcn.140004bcc @ 0x140004c33(x)
+│   │  ╎└─> 0x140004c42      4c63442450     movsxd r8, dword [var_50h]
+│   │  ╎    0x140004c47      33d2           xor edx, edx
+│   │  ╎    0x140004c49      488bc8         mov rcx, rax
+│   │  ╎    0x140004c4c      e8af4f0000     call fcn.140009c00
+│   │  ╎    0x140004c51      c7070000fe01   mov dword [rdi], 0x1fe0000 ; [0x1fe0000:4]=-1
+│   │  ╎    0x140004c57      488d4710       lea rax, [rdi + 0x10]
+│   │  ╎    0x140004c5b      48894708       mov qword [rdi + 8], rax
+│   │  ╎    0x140004c5f      448b4c2450     mov r9d, dword [var_50h]
+│   │  ╎    0x140004c64      488b4c2458     mov rcx, qword [var_58h]
+│   │  ╎    0x140004c69      488d442450     lea rax, [var_50h]
+│   │  ╎    0x140004c6e      4c8bc7         mov r8, rdi
+│   │  ╎    0x140004c71      ba1b000000     mov edx, 0x1b              ; 27
+│   │  ╎    0x140004c76      4889442420     mov qword [var_20h_2], rax
+│   │  ╎    0x140004c7b      ff15d7650000   call qword [sym.imp.ntoskrnl.exe_ZwQueryInformationProcess] ; [0x14000b258:8]=0x17a56 reloc.ntoskrnl.exe_ZwQueryInformationProcess ; "Vz\x01"
+│   │  ╎    0x140004c81      488b4c2458     mov rcx, qword [var_58h]
+│   │  ╎    0x140004c86      8bd8           mov ebx, eax
+│   │  ╎    0x140004c88      ff1522640000   call qword [sym.imp.ntoskrnl.exe_ZwClose] ; [0x14000b0b0:8]=0x1759a reloc.ntoskrnl.exe_ZwClose
+│   │  ╎    0x140004c8e      85db           test ebx, ebx
+│   │  ╎┌─< 0x140004c90      7910           jns 0x140004ca2
+│   │  ╎│   0x140004c92      33d2           xor edx, edx
+│   │  ╎│   0x140004c94      488bcf         mov rcx, rdi
+│   │  ╎│   0x140004c97      ff15c3630000   call qword [sym.imp.ntoskrnl.exe_ExFreePoolWithTag] ; [0x14000b060:8]=0x174cc reloc.ntoskrnl.exe_ExFreePoolWithTag
+│   │  └──< 0x140004c9d      e948ffffff     jmp 0x140004bea
+│   │   │   ; CODE XREF from fcn.140004bcc @ 0x140004c90(x)
+│   │   └─> 0x140004ca2      488bc7         mov rax, rdi
+│   │       ; CODE XREF from fcn.140004bcc @ 0x140004bec(x)
+│   └─────> 0x140004ca5      488b5c2460     mov rbx, qword [var_18h]
+│           0x140004caa      488b742468     mov rsi, qword [var_20h]
+│           0x140004caf      4883c440       add rsp, 0x40
+│           0x140004cb3      5f             pop rdi
+└           0x140004cb4      c3             ret
+            ; CALL XREF from fcn.140007818 @ +0xd6(x)
+┌ 533: fcn.140007600 (int64_t arg1);
+│ `- args(rcx) vars(13:sp[0x10..0x4b0])
+│           0x140007600      48895c2410     mov qword [var_10h], rbx
+│           0x140007605      4889742418     mov qword [var_18h], rsi
+│           0x14000760a      55             push rbp
+│           0x14000760b      57             push rdi
+│           0x14000760c      4154           push r12
+│           0x14000760e      4156           push r14
+│           0x140007610      4157           push r15
+│           0x140007612      488dac2480..   lea rbp, [rsp - 0x380]
+│           0x14000761a      4881ec8004..   sub rsp, 0x480
+│           0x140007621      488b05504a..   mov rax, qword [0x14000c078] ; [0x14000c078:8]=0x2b992ddfa232
+│           0x140007628      4833c4         xor rax, rsp
+│           0x14000762b      4889857003..   mov qword [var_370h], rax
+│           0x140007632      4533ff         xor r15d, r15d
+│           0x140007635      488bd9         mov rbx, rcx               ; arg1
+│           0x140007638      41be06020000   mov r14d, 0x206            ; 518
+│           0x14000763e      488d8d6201..   lea rcx, [var_162h]
+│           0x140007645      33d2           xor edx, edx
+│           0x140007647      458bc6         mov r8d, r14d
+│           0x14000764a      4c897c2420     mov qword [var_20h], r15
+│           0x14000764f      418af7         mov sil, r15b
+│           0x140007652      664489bd60..   mov word [var_160h], r15w
+│           0x14000765a      e8a1250000     call fcn.140009c00
+│           0x14000765f      488d4c2452     lea rcx, [var_52h]
+│           0x140007664      458bc6         mov r8d, r14d
+│           0x140007667      33d2           xor edx, edx
+│           0x140007669      418bff         mov edi, r15d
+│           0x14000766c      6644897c2450   mov word [var_50h], r15w
+│           0x140007672      e889250000     call fcn.140009c00
+│           0x140007677      488d542420     lea rdx, [var_20h]
+│           0x14000767c      488bcb         mov rcx, rbx
+│           0x14000767f      ff150b3c0000   call qword [sym.imp.ntoskrnl.exe_PsLookupProcessByProcessId] ; [0x14000b290:8]=0x17b02 reloc.ntoskrnl.exe_PsLookupProcessByProcessId
+│           0x140007685      85c0           test eax, eax
+│       ┌─< 0x140007687      0f883a010000   js 0x1400077c7
+│       │   0x14000768d      ff155d3a0000   call qword [sym.imp.ntoskrnl.exe_IoGetCurrentProcess] ; [0x14000b0f0:8]=0x17642 reloc.ntoskrnl.exe_IoGetCurrentProcess ; "Bv\x01"
+│       │   0x140007693      483b442420     cmp rax, qword [var_20h]
+│      ┌──< 0x140007698      0f8429010000   je 0x1400077c7
+│      ││   0x14000769e      48bb140000..   movabs rbx, 0xfffff78000000014 ; '\x14'
+│      ││   0x1400076a8      488b1b         mov rbx, qword [rbx]
+│      ││   0x1400076ab      488b4c2420     mov rcx, qword [var_20h]
+│      ││   0x1400076b0      ff15f23b0000   call qword [sym.imp.ntoskrnl.exe_PsGetProcessCreateTimeQuadPart] ; [0x14000b2a8:8]=0x17b4e reloc.ntoskrnl.exe_PsGetProcessCreateTimeQuadPart ; "N{\x01"
+│      ││   0x1400076b6      482bd8         sub rbx, rax
+│      ││   0x1400076b9      4881fb80f0..   cmp rbx, 0x2faf080
+│     ┌───< 0x1400076c0      0f8c01010000   jl 0x1400077c7
+│     │││   0x1400076c6      488b4c2420     mov rcx, qword [var_20h]
+│     │││   0x1400076cb      ff15df3b0000   call qword [sym.imp.ntoskrnl.exe_PsGetProcessId] ; [0x14000b2b0:8]=0x17b70 reloc.ntoskrnl.exe_PsGetProcessId ; "p{\x01"
+│     │││   0x1400076d1      4883f804       cmp rax, 4                 ; 4
+│    ┌────< 0x1400076d5      0f86ec000000   jbe 0x1400077c7
+│    ││││   0x1400076db      488b4c2420     mov rcx, qword [var_20h]
+│    ││││   0x1400076e0      e8e7d4ffff     call fcn.140004bcc
+│    ││││   0x1400076e5      488bf8         mov rdi, rax
+│    ││││   0x1400076e8      4885c0         test rax, rax
+│   ┌─────< 0x1400076eb      0f84d6000000   je 0x1400077c7
+│   │││││   0x1400076f1      488d856001..   lea rax, [var_160h]
+│   │││││   0x1400076f8      488d4c2428     lea rcx, [var_28h]
+│   │││││   0x1400076fd      488bd7         mov rdx, rdi
+│   │││││   0x140007700      4889442430     mov qword [var_30h], rax
+│   │││││   0x140007705      c744242800..   mov dword [var_28h], 0x2080000 ; [0x2080000:4]=-1
+│   │││││   0x14000770d      ff1525390000   call qword [sym.imp.ntoskrnl.exe_RtlCopyUnicodeString] ; [0x14000b038:8]=0x17456 reloc.ntoskrnl.exe_RtlCopyUnicodeString ; "Vt\x01"
+│   │││││   0x140007713      488b4c2420     mov rcx, qword [var_20h]
+│   │││││   0x140007718      488d442450     lea rax, [var_50h]
+│   │││││   0x14000771d      488d542438     lea rdx, [var_38h]
+│   │││││   0x140007722      4889442440     mov qword [var_40h], rax
+│   │││││   0x140007727      c744243800..   mov dword [var_38h], 0x2080000 ; [0x2080000:4]=-1
+│   │││││   0x14000772f      e82ce1ffff     call fcn.140005860
+│   │││││   0x140007734      85c0           test eax, eax
+│  ┌──────< 0x140007736      0f888b000000   js 0x1400077c7
+│  ││││││   0x14000773c      440fb7442438   movzx r8d, word [var_38h]
+│  ││││││   0x140007742      488d542438     lea rdx, [var_38h]
+│  ││││││   0x140007747      33c9           xor ecx, ecx
+│  ││││││   0x140007749      4183c010       add r8d, 0x10              ; 16
+│  ││││││   0x14000774d      e8169affff     call fcn.140001168
+│  ││││││   0x140007752      4885c0         test rax, rax
+│ ┌───────< 0x140007755      756d           jne 0x1400077c4
+│ │││││││   0x140007757      458d775c       lea r14d, [r15 + 0x5c]
+│ │││││││   0x14000775b      488d4c2450     lea rcx, [var_50h]
+│ │││││││   0x140007760      418bd6         mov edx, r14d
+│ │││││││   0x140007763      e814120000     call fcn.14000897c
+│ │││││││   0x140007768      488bd8         mov rbx, rax
+│ │││││││   0x14000776b      4885c0         test rax, rax
+│ ────────< 0x14000776e      7457           je 0x1400077c7
+│ │││││││   0x140007770      66448938       mov word [rax], r15w
+│ │││││││   0x140007774      488d856001..   lea rax, [var_160h]
+│ │││││││   0x14000777b      488d5302       lea rdx, [rbx + 2]
+│ │││││││   0x14000777f      488d4c2428     lea rcx, [var_28h]
+│ │││││││   0x140007784      c744242800..   mov dword [var_28h], 0x2080000 ; [0x2080000:4]=-1
+│ │││││││   0x14000778c      4889442430     mov qword [var_30h], rax
+│ │││││││   0x140007791      ff1529390000   call qword [sym.imp.ntoskrnl.exe_RtlInitUnicodeString] ; [0x14000b0c0:8]=0x175b8 reloc.ntoskrnl.exe_RtlInitUnicodeString
+│ │││││││   0x140007797      440fb7442428   movzx r8d, word [var_28h]
+│ │││││││   0x14000779d      488d542428     lea rdx, [var_28h]
+│ │││││││   0x1400077a2      4183c010       add r8d, 0x10              ; 16
+│ │││││││   0x1400077a6      33c9           xor ecx, ecx
+│ │││││││   0x1400077a8      e8bb99ffff     call fcn.140001168
+│ │││││││   0x1400077ad      4885c0         test rax, rax
+│ ────────< 0x1400077b0      7415           je 0x1400077c7
+│ │││││││   0x1400077b2      488d542438     lea rdx, [var_38h]
+│ │││││││   0x1400077b7      418d4f03       lea ecx, [r15 + 3]
+│ │││││││   0x1400077bb      66448933       mov word [rbx], r14w
+│ │││││││   0x1400077bf      e858e8ffff     call fcn.14000601c
+│ │││││││   ; CODE XREF from fcn.140007600 @ 0x140007755(x)
+│ └───────> 0x1400077c4      40b601         mov sil, 1
+│  ││││││   ; XREFS: CODE 0x140007687  CODE 0x140007698  CODE 0x1400076c0  
+│  ││││││   ; XREFS: CODE 0x1400076d5  CODE 0x1400076eb  CODE 0x140007736  
+│  ││││││   ; XREFS: CODE 0x14000776e  CODE 0x1400077b0  
+│ ─└└└└└└─> 0x1400077c7      488b4c2420     mov rcx, qword [var_20h]
+│           0x1400077cc      4885c9         test rcx, rcx
+│       ┌─< 0x1400077cf      7406           je 0x1400077d7
+│       │   0x1400077d1      ff15a9390000   call qword [sym.imp.ntoskrnl.exe_ObfDereferenceObject] ; [0x14000b180:8]=0x177d8 reloc.ntoskrnl.exe_ObfDereferenceObject
+│       │   ; CODE XREF from fcn.140007600 @ 0x1400077cf(x)
+│       └─> 0x1400077d7      4885ff         test rdi, rdi
+│       ┌─< 0x1400077da      740b           je 0x1400077e7
+│       │   0x1400077dc      33d2           xor edx, edx
+│       │   0x1400077de      488bcf         mov rcx, rdi
+│       │   0x1400077e1      ff1579380000   call qword [sym.imp.ntoskrnl.exe_ExFreePoolWithTag] ; [0x14000b060:8]=0x174cc reloc.ntoskrnl.exe_ExFreePoolWithTag
+│       │   ; CODE XREF from fcn.140007600 @ 0x1400077da(x)
+│       └─> 0x1400077e7      408ac6         mov al, sil
+│           0x1400077ea      488b8d7003..   mov rcx, qword [var_370h]
+│           0x1400077f1      4833cc         xor rcx, rsp
+│           0x1400077f4      e857200000     call fcn.140009850
+│           0x1400077f9      4c8d9c2480..   lea r11, [var_480h]
+│           0x140007801      498b5b38       mov rbx, qword [r11 + 0x38]
+│           0x140007805      498b7340       mov rsi, qword [r11 + 0x40]
+│           0x140007809      498be3         mov rsp, r11
+│           0x14000780c      415f           pop r15
+│           0x14000780e      415e           pop r14
+│           0x140007810      415c           pop r12
+│           0x140007812      5f             pop rdi
+│           0x140007813      5d             pop rbp
+└           0x140007814      c3             ret
