@@ -2,7 +2,7 @@
 
 > BYOVD-powered kernel toolkit — see what System Informer can't.
 
-Process inspection, PPL bypass, privilege escalation, service/driver enumeration, network state, ObRegisterCallbacks management, and Ps\*NotifyRoutine enumeration/disable via RTCore64.sys (CVE-2019-16098).
+Process inspection, PPL bypass, privilege escalation, service/driver enumeration, network state, ObRegisterCallbacks management, Ps\*NotifyRoutine enumeration/disable, open file handle enumeration, minifilter inspection/detach, and force USB eject via RTCore64.sys (CVE-2019-16098).
 
 ## Commands
 
@@ -40,6 +40,25 @@ Process inspection, PPL bypass, privilege escalation, service/driver enumeration
 | `/ndisable <fn_addr>` | Zero the `EX_CALLBACK` slot for the matching entry — **⚠ BSOD risk, see below** |
 
 > **⚠ BSOD warning — `/ndisable`:** Zeroing a notify slot while the kernel or another driver holds a rundown reference to that `EX_CALLBACK_ROUTINE_BLOCK` can cause an immediate bugcheck. Always enumerate first with `/notify`, identify the target, then disable during a quiet window (no active callbacks in flight). Never use on `ntoskrnl.exe` or `WdFilter.sys` entries.
+
+### File Handles
+| Command | Description |
+|---|---|
+| `/handles [drive]` | Enumerate all open file handles system-wide; optionally filter by volume (e.g. `/handles E`) |
+
+### Minifilters
+| Command | Description |
+|---|---|
+| `/flt [drive]` | Enumerate minifilter instances via two-level kernel walk (FrameList → FLTP_FRAME → FLT_FILTER → FLT_INSTANCE); optionally filter by volume |
+| `/flt-detach <filter> <drive>` | Force-detach a mandatory minifilter by zeroing `InstanceQueryTeardown` then calling `FilterDetachW` |
+| `/unmount <drive>` | Force dismount + physical USB eject — filesystem flush, volume offline, PnP safe removal |
+
+### Deep Scan
+| Command | Description |
+|---|---|
+| `/memscan <pid> [all]` | Compare all loaded DLL sections vs on-disk image; highlights patches/hooks (skips noisy sections by default) |
+| `/memrestore <pid> <dll> [section]` | Restore modified sections from disk via `WriteProcessMemory` |
+| `/watchfix <proc> <dll>[:<sec>] ...` | Watch for new instances of `<proc>` and auto-restore specified DLL sections on launch |
 
 ### Global flags
 | Flag | Description |
@@ -135,6 +154,9 @@ ObMaster
 │   ├── cmd_obcb.cpp               /obcb + /disable + /enable
 │   ├── cmd_notify.cpp             /notify + /ndisable
 │   ├── cmd_runas.cpp              /runas system|ti
+│   ├── cmd_memscan.cpp            /memscan + /memrestore + /watchfix
+│   ├── cmd_handles.cpp            /handles
+│   ├── cmd_flt.cpp                /flt + /flt-detach + /unmount
 │   └── main.cpp
 ├── build/
 │   ├── build.bat                  Main build script
