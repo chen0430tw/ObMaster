@@ -4,8 +4,8 @@ chcp 65001 >nul
 set MSVC=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207
 set SDK=C:\Program Files (x86)\Windows Kits\10
 set SDKVER=10.0.26100.0
-set SRC=C:\Users\Administrator\ObMaster\src
-set OUT=C:\Users\Administrator\ObMaster\build\ObMaster.exe
+set SRC=D:\ObMaster\src
+set OUT=D:\ObMaster\build\ObMaster.exe
 
 set PATH=%MSVC%\bin\Hostx64\x64;%PATH%
 set INCLUDE=%MSVC%\include;%SDK%\Include\%SDKVER%\ucrt;%SDK%\Include\%SDKVER%\um;%SDK%\Include\%SDKVER%\shared
@@ -26,8 +26,10 @@ cl.exe /nologo /O2 /MT /EHsc /std:c++17 /utf-8 ^
     "%SRC%\cmd_epdump.cpp" ^
     "%SRC%\cmd_notify.cpp" ^
     "%SRC%\cmd_memscan.cpp" ^
+    "%SRC%\cmd_handles.cpp" ^
+    "%SRC%\cmd_flt.cpp" ^
     /Fe:"%OUT%" ^
-    /link advapi32.lib psapi.lib iphlpapi.lib ws2_32.lib
+    /link advapi32.lib psapi.lib iphlpapi.lib ws2_32.lib fltlib.lib setupapi.lib cfgmgr32.lib
 
 if %ERRORLEVEL% == 0 (
     echo [+] Build OK: %OUT%

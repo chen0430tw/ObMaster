@@ -22,3 +22,7 @@ void CmdMemRestore(DWORD pid, const char* dll,
 struct WatchTarget { std::string dll; std::string section; };
 void CmdWatchFix(const char* proc,
                  const std::vector<WatchTarget>& targets);  // /watchfix <proc> <dll>[:<sec>] ...
+void CmdHandles(const char* filter);                        // /handles [drive]
+void CmdFlt(const char* volume);                            // /flt [drive]
+void CmdFltDetach(const char* filter, const char* volume);  // /flt-detach <f> <v>
+void CmdUnmount(char drive);                                // /unmount <drive>

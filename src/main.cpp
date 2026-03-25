@@ -53,6 +53,12 @@ static void Usage(const char* prog) {
         "  NotifyRoutines:\n"
         "    /notify [image|process|thread]  Enumerate Ps*NotifyRoutine arrays\n"
         "    /ndisable <fn_addr>             Zero EX_CALLBACK slot for matching entry\n\n"
+        "  File handles:\n"
+        "    /handles [drive]               Enumerate open file handles system-wide (e.g. /handles E)\n\n"
+        "  Minifilters:\n"
+        "    /flt [drive]                   Enumerate minifilter instances via kernel walk\n"
+        "    /flt-detach <filter> <drive>   Force-detach mandatory minifilter (zeros teardown callback)\n"
+        "    /unmount <drive>               Force dismount + eject (like /kill for drives)\n\n"
         "  Deep scan:\n"
         "    /memscan <pid> [all]           Compare DLL sections vs on-disk (default: skip .rdata/.data noise)\n"
         "    /memrestore <pid> <dll> [sec]  Restore sections from disk (default: skip noisy sections)\n"
@@ -161,6 +167,22 @@ static bool TryCommandHelp(const char* cmd) {
             "/enable <PreOp_addr> — set Enabled=1 on an ObCallback entry\n\n"
             "  Finds the entry by its original PreOp address and sets Enabled=1.\n"
             "  Note: does not restore zeroed function pointers — use before disabling.\n"
+        );
+        return true;
+    }
+    if (_stricmp(cmd, "handles") == 0) {
+        printf(
+            "/handles [drive] — enumerate all open file handles system-wide\n\n"
+            "  Technique:\n"
+            "    1. NtQuerySystemInformation(SystemHandleInformation) — full handle table\n"
+            "    2. Probe own process to identify File object type index\n"
+            "    3. For each foreign File handle: DuplicateHandle + GetFinalPathNameByHandle\n"
+            "    4. Filter by NT device path (QueryDosDevice resolves drive -> \\Device\\HarddiskVolumeN)\n\n"
+            "  Arguments:\n"
+            "    (none)   list all open file handles across all processes\n"
+            "    drive    filter to a specific volume, e.g. /handles E or /handles E:\n\n"
+            "  Output columns: PID  Process  Path\n\n"
+            "  Flags: /json  -> JSON array of handle objects\n"
         );
         return true;
     }
@@ -362,6 +384,24 @@ int main(int argc, char* argv[]) {
             g_drv->Close(); return 1;
         }
         CmdWatchFix(proc, targets);
+    }
+    else if (_stricmp(cmd, "handles") == 0) {
+        const char* filter = nextArg();
+        CmdHandles(filter);
+    }
+    else if (_stricmp(cmd, "flt") == 0) {
+        const char* vol = nextArg();
+        CmdFlt(vol);
+    }
+    else if (_stricmp(cmd, "flt-detach") == 0) {
+        const char* flt = nextArg(0);
+        const char* vol = nextArg(1);
+        CmdFltDetach(flt, vol);
+    }
+    else if (_stricmp(cmd, "unmount") == 0) {
+        const char* vol = nextArg();
+        if (!vol) { printf("[!] /unmount requires a drive letter\n"); g_drv->Close(); return 1; }
+        CmdUnmount(vol[0]);
     }
     else {
         if (g_jsonMode)
