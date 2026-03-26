@@ -3,28 +3,95 @@
 #include <Psapi.h>
 #include <algorithm>
 #include <map>
+#include <vector>
 
 namespace KUtil {
 
 // ─── Kernel export resolution ─────────────────────────────────────────────────
+// Windows 10 refuses LoadLibrary on ntoskrnl.exe (error 2, by design).
+// Instead: read the PE file from disk, parse the export directory, compute RVA.
+
+static DWORD64 ParseExport(const WCHAR* path, const char* name) {
+    HANDLE hf = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ,
+                            NULL, OPEN_EXISTING, 0, NULL);
+    if (hf == INVALID_HANDLE_VALUE) return 0;
+
+    DWORD sz = GetFileSize(hf, NULL);
+    std::vector<BYTE> buf(sz);
+    DWORD rd;
+    bool ok = ReadFile(hf, buf.data(), sz, &rd, NULL) && rd == sz;
+    CloseHandle(hf);
+    if (!ok) return 0;
+
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(buf.data());
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(buf.data() + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+
+    auto* sec = IMAGE_FIRST_SECTION(nt);
+    WORD  nSec = nt->FileHeader.NumberOfSections;
+
+    // RVA → file offset via section table
+    auto rva2foa = [&](DWORD rva) -> DWORD {
+        for (WORD i = 0; i < nSec; i++) {
+            DWORD vbeg = sec[i].VirtualAddress;
+            DWORD vend = vbeg + sec[i].SizeOfRawData;
+            if (rva >= vbeg && rva < vend)
+                return sec[i].PointerToRawData + (rva - vbeg);
+        }
+        return 0;
+    };
+
+    auto& ed = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (!ed.VirtualAddress) return 0;
+    DWORD efoa = rva2foa(ed.VirtualAddress);
+    if (!efoa) return 0;
+
+    auto* exp  = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(buf.data() + efoa);
+    auto* nameRVAs = reinterpret_cast<DWORD*>(buf.data() + rva2foa(exp->AddressOfNames));
+    auto* ords     = reinterpret_cast<WORD* >(buf.data() + rva2foa(exp->AddressOfNameOrdinals));
+    auto* funcRVAs = reinterpret_cast<DWORD*>(buf.data() + rva2foa(exp->AddressOfFunctions));
+
+    for (DWORD i = 0; i < exp->NumberOfNames; i++) {
+        DWORD nfoa = rva2foa(nameRVAs[i]);
+        if (!nfoa) continue;
+        const char* expName = reinterpret_cast<const char*>(buf.data() + nfoa);
+        if (strcmp(expName, name) == 0)
+            return (DWORD64)funcRVAs[ords[i]];  // return RVA
+    }
+    return 0;
+}
 
 DWORD64 KernelExport(const char* name) {
     static std::map<std::string, DWORD64> s_cache;
     auto it = s_cache.find(name);
     if (it != s_cache.end()) return it->second;
 
-    // Get kernel base from EnumDeviceDrivers (drivers[0] == ntoskrnl)
+    // Kernel base (ntoskrnl is always drivers[0])
     LPVOID d[1024]; DWORD cb;
     if (!EnumDeviceDrivers(d, sizeof(d), &cb)) return 0;
     DWORD64 kBase = (DWORD64)d[0];
 
-    // Load ntoskrnl as a user-mode DLL to compute RVA, then apply to kernel base
-    HMODULE hNt = LoadLibraryW(L"ntoskrnl.exe");
-    if (!hNt) return 0;
-    DWORD64 offset = (DWORD64)GetProcAddress(hNt, name) - (DWORD64)hNt;
-    FreeLibrary(hNt);
+    // Get ntoskrnl path via kernel driver enumeration, then convert to user path
+    WCHAR drvPath[MAX_PATH];
+    if (!GetDeviceDriverFileNameW(d[0], drvPath, MAX_PATH)) return 0;
+    // drvPath: \SystemRoot\system32\ntoskrnl.exe or \Device\...
+    WCHAR filePath[MAX_PATH];
+    if (_wcsnicmp(drvPath, L"\\SystemRoot\\", 12) == 0) {
+        WCHAR winDir[MAX_PATH];
+        GetWindowsDirectoryW(winDir, MAX_PATH);
+        swprintf_s(filePath, MAX_PATH, L"%s\\%s", winDir, drvPath + 12);
+    } else {
+        // Fall back to known location
+        WCHAR winDir[MAX_PATH];
+        GetWindowsDirectoryW(winDir, MAX_PATH);
+        swprintf_s(filePath, MAX_PATH, L"%s\\System32\\ntoskrnl.exe", winDir);
+    }
 
-    DWORD64 va = kBase + offset;
+    DWORD64 rva = ParseExport(filePath, name);
+    if (!rva) return 0;
+
+    DWORD64 va = kBase + rva;
     s_cache[name] = va;
     return va;
 }

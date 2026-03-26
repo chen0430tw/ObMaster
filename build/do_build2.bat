@@ -34,6 +34,7 @@ cl.exe /nologo /O2 /MT /EHsc /std:c++17 /utf-8 ^
     "%SRC%\cmd_safepatch.cpp" ^
     "%SRC%\cmd_timedelta.cpp" ^
     "%SRC%\cmd_guard.cpp" ^
+    "%SRC%\cmd_pte.cpp" ^
     /Fe:"%OUT%" ^
     /link advapi32.lib psapi.lib iphlpapi.lib ws2_32.lib fltlib.lib setupapi.lib cfgmgr32.lib
 

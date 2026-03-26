@@ -277,6 +277,162 @@ SimKsafe.exe <pid|name>
 SimVBox.exe [--once]
 ```
 
+---
+
+## BSOD 分析报告（2026-03-26）
+
+### 三次蓝屏事件
+
+今日共发生 3 次 BSOD，WER 报告及 Minidump 已确认。
+
+#### BSOD 1（05:56）— STOP 0xBE
+
+```
+故障模块: RTCore64!unknown_function
+STOP code: 0xBE = ATTEMPTED_WRITE_TO_READONLY_MEMORY
+P2 (写入地址): 0xFFFFF80127ED31B4 = ksafecenter64.sys + 0x31B4
+```
+
+**根因：** 上个会话的 `/patch` 命令用 `Wr8` 逐字节写入 ksafecenter64 代码页。
+内核代码页的 PTE 没有 Write 位（W^X 执行保护），RTCore64 直接虚拟写入时
+触发 CPU 写保护 → STOP 0xBE。
+
+---
+
+#### BSOD 2（11:45）+ BSOD 3（12:25）— 同一 bug
+
+```
+故障模块: RTCore64!unknown_function+0x14DB
+STOP code: 0x3B = SYSTEM_SERVICE_EXCEPTION
+P2: 0xC0000005 = STATUS_ACCESS_VIOLATION
+P3 BSOD2: 0xFFFFF80644DC14DB = RTCore64_base_1 + 0x14DB
+P3 BSOD3: 0xFFFFF80176B814DB = RTCore64_base_2 + 0x14DB  (KASLR重载，偏移一致)
+```
+
+**根因：** `/safepatch` 调用 `GetMmPteBase()` → `KernelExport("MmPteBase")` 返回 0
+→ `g_drv->Rd64(0)` 让 RTCore64 读内核地址 0 → ACCESS_VIOLATION → STOP 0x3B。
+
+调用链：
+
+```
+GetMmPteBase()
+  -> KUtil::KernelExport("MmPteBase")
+       -> LoadLibraryW("ntoskrnl.exe")   返回 NULL（OS 拦截，error 2）
+       -> return 0;                      不做 null 检查直接返回 0
+  -> g_drv->Rd64(0)                      RTCore64 读地址 0 -> AV -> BSOD
+```
+
+---
+
+### 根因分析
+
+#### 问题 1：LoadLibraryW 加载 ntoskrnl.exe 被拦截
+
+Windows 10 故意对 ntoskrnl.exe 返回 ERROR_FILE_NOT_FOUND (error 2)，
+即使文件位于 C:\Windows\System32\ 并且确实存在。
+`LoadLibraryExW` 加任何 flag 同样失败（测试了 LOAD_LIBRARY_AS_IMAGE_RESOURCE / LOAD_LIBRARY_AS_DATAFILE）。
+
+**修复（已提交）：** `kutil.cpp` 改用 `CreateFile` + 手动解析 PE 导出表（`ParseExport` 函数），
+完全绕过 LoadLibrary。
+
+#### 问题 2：MmPteBase 不在 ntoskrnl.exe 导出表
+
+尽管文档记载 Windows 10 RS3 (build 16299) 起导出 `MmPteBase`，
+但在 **build 19045 (22H2)** 上，ntoskrnl.exe 的 Export Directory（3070 个条目）
+**不含 MmPteBase**，`GetProcAddress` 会返回 NULL。
+
+#### 问题 3：MmPteBase 定位方案
+
+扫描 ntoskrnl.exe `.text` 节所有 `MOV r64,[RIP+offset]` 指令，
+统计指向 `.data` 节的引用次数：
+
+```
+.data RVA    引用次数   候选变量
+0x00C124D0   1302      MmPteBase（高度疑似，比第二名高 65 倍）
+0x00C01AA8   20        其他内核全局
+0x00C04F48   20        其他内核全局
+```
+
+MmPteBase 全局变量 VA = ntoskrnl_base + 0xC124D0
+当前系统值：0xFFFFF80639000000 + 0xC124D0 = 0xFFFFF80639C124D0（待 Rd64 验证）
+
+---
+
+#### BSOD 4（13:12）— STOP 0xBE（第二次只读写入）
+
+```
+故障模块: RTCore64!unknown_function
+STOP code: 0xBE = ATTEMPTED_WRITE_TO_READONLY_MEMORY
+P2 (写入地址): 0xFFFFF806F08C0010 = RTCore64_base + 0x10
+```
+
+**根因：** `/safepatch` 在影子页失败后回落到 `Wr32` 直接写 RTCore64 自身代码页。
+代码页 PTE.Write=0 → STOP 0xBE。
+
+**修复：** 移除 Wr32 回落路径，影子页失败时直接报错退出，不做任何内核写入。
+
+---
+
+#### BSOD 5（13:59）— STOP 0x50（页面错误）
+
+```
+故障模块: RTCore64!unknown_function
+STOP code: 0x50 = PAGE_FAULT_IN_NONPAGED_AREA
+P2 (错误地址): 0xFFFFF806F08C0010 = RTCore64_base + 0x10
+P3: 0 = 读操作
+P4 (崩溃 RIP): 0xFFFFF8082CCB14F6
+```
+
+**根因：** WritePte 的三步写产生了 Present=0 竞态窗口：
+
+```
+步骤1: Wr32(pteVA,   lo & ~1)  ← Present=0  ← 其他CPU执行RTCore64代码 → PAGE_FAULT
+步骤2: Wr32(pteVA+4, hi_new)
+步骤3: Wr32(pteVA,   lo)       ← Present=1 恢复（但已经太晚了）
+```
+
+另一个根本错误：**以 RTCore64 自身代码页为测试目标**。RTCore64 正在执行
+（处理我们的 IOCTL），另一个 CPU 核必然在访问其代码 → 竞态不可避免。
+
+**修复：**
+1. WritePte 改为 hi→lo 两步写，避免 Present=0 窗口：
+   - Step 1: `Wr32(pteVA+4, hi_new)` — 高位先写，PTE 仍 Present=1（旧低位）
+   - Step 2: `Wr32(pteVA,   lo_new)` — 低位写入，PTE 完整更新
+2. 禁止使用 RTCore64 自身地址作为 safepatch 测试目标
+
+---
+
+### 所有 BSOD 总结与修复状态
+
+| # | 时间 | STOP | 地址 | 根因 | 修复状态 |
+|---|------|------|------|------|----------|
+| 1 | 05:56 | 0xBE | ksafecenter+0x31B4 | `/patch` Wr8 逐字节写只读页 | 已弃用 `/patch` |
+| 2 | 11:45 | 0x3B | RTCore64+0x14DB | `Rd64(0)`（LoadLibrary 失败） | 已修复 ParseExport+null检查 |
+| 3 | 12:25 | 0x3B | RTCore64+0x14DB | 同上 | 同上 |
+| 4 | 13:12 | 0xBE | RTCore64+0x10 | safepatch Wr32 回落写只读页 | 已修复 移除Wr32回落 |
+| 5 | 13:59 | 0x50 | RTCore64+0x10 | WritePte 3步写 Present=0 竞态 | 已修复 改hi→lo 2步写 |
+
+---
+
+### 修复进度
+
+| 修复项 | 状态 |
+|--------|------|
+| kutil.cpp: LoadLibrary 改为 PE 磁盘手动解析 | 已完成 |
+| pte.cpp: GetMmPteBase null 检查（防止 Rd64(0)）| 已有 |
+| pte.cpp: MmPteBase 签名扫描 fallback（.text 引用计数）| 已完成 |
+| cmd_safepatch.cpp: 移除 Wr32 回落路径 | 已完成 |
+| pte.cpp: WritePte 改 hi→lo 2步写（消除 Present=0 窗口）| 已完成 |
+
+---
+
+### 下一步
+
+1. 启动 RTCore64，验证 MmPteBase 扫描输出正确值（应落在 0xFFFF????00000000）
+2. 用非 RTCore64 目标测试 /safepatch 机制（如 ksafecenter64 或其他驱动）
+3. 加载 ksafecenter64，执行 `/safepatch <ksafe_base+0x31B4> 33C0C390`
+4. 验证 VirtualBox 不再出现 evil handle
+
 每隔 1 秒（或 `--once` 只扫一次）：
 
 1. 对自身调用 `OpenProcess(PROCESS_ALL_ACCESS)` 获取已知句柄值
@@ -441,3 +597,77 @@ PreOp callback (+0x78B8)
   - 效果：回调永不执行，IsProtectedPid 不调用，不产生瞬态句柄
   - 已有机制：`/disable` 清零 Pre 指针效果相同，但每次重启需重新执行
 
+
+---
+
+## BSOD 分析报告（2026-03-26）
+
+### 三次蓝屏事件
+
+今日共发生 3 次 BSOD，WER 报告已确认。
+
+#### BSOD #1（05:56）— STOP 0xBE
+
+
+**根因：** 上个会话的  命令用  逐字节写入 ksafecenter64 代码页。  
+内核代码页的 PTE 没有 Write 位（W^X 执行保护），RTCore64 直接虚拟写入时触发 CPU 保护 → STOP 0xBE。
+
+---
+
+#### BSOD #2（11:45）+ BSOD #3（12:25）— 同一 bug，STOP 0x3B
+
+
+**根因：** ObMaster  调用 ，最终执行  → RTCore64 在内核态读地址 0 → ACCESS_VIOLATION → STOP 0x3B。
+
+**调用链：**
+
+
+---
+
+### 根因分析
+
+#### 问题 1：LoadLibraryW 加载 ntoskrnl.exe 被拦截
+
+Windows 10 故意返回 ERROR_FILE_NOT_FOUND (error 2) 阻止用户态加载内核 DLL，即使文件存在。
+ 加所有 flag（、）同样失败。
+
+**修复：** 改为  直接读取磁盘上的 ntoskrnl.exe 并手动解析 PE 导出表（ 函数）。
+
+#### 问题 2：MmPteBase 不在 ntoskrnl.exe 导出表
+
+尽管文档记载 Windows 10 RS3 (1709) 起添加了  导出，  
+但在 **build 19045 (22H2)** 上， **不在 ntoskrnl.exe 的 Export Directory 中**（3070 个导出条目均不含它）。
+
+#### 问题 3：MmPteBase 定位方法
+
+通过扫描 ntoskrnl.exe  节中所有  指令，  
+统计指向  节的引用次数，得到：
+
+| .data RVA      | 引用次数 | 候选变量         |
+|----------------|----------|-----------------|
+|    | **1302** | MmPteBase ← 高度疑似 |
+|    | 20       | 其他内核全局变量  |
+|    | 20       | 其他内核全局变量  |
+
+ 全局变量 VA = ntoskrnl_base +   
+当前系统：
+
+---
+
+### 修复进度
+
+| 修复项 | 状态 |
+|--------|------|
+| : LoadLibrary → ParseExport（PE 磁盘解析） | ✅ 已修复 |
+| : GetMmPteBase 加 null 检查 | ✅ 已有（pte.cpp 已含 null 检查） |
+| : MmPteBase 不在导出表时的扫描 fallback | 🔄 进行中 |
+|  在 RTCore64+0x14DB 崩溃 | ✅ 根因已定位（null check 会阻止）|
+
+---
+
+### 下一步
+
+1. 完成  的签名扫描 fallback（用 .text 引用计数法）
+2. 测试  不再崩溃
+3. 加载 ksafecenter64，执行 
+4. 验证 SimVBox / VirtualBox 不再出现 evil handle

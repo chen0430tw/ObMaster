@@ -8,6 +8,7 @@
 #include "commands.h"
 #include "globals.h"
 #include "ansi.h"
+#include "pte.h"
 
 // Global backend instance
 IDriverBackend* g_drv = nullptr;
@@ -53,7 +54,13 @@ static void Usage(const char* prog) {
         "    /disable <PreOp_addr>  Disable callback (zero PreOp/PostOp, Enabled=0)\n"
         "    /patch <addr> <hex>         Write raw bytes (legacy, unsafe — byte-by-byte)\n"
         "    /safepatch <addr> <hex>     Safe patch via shadow-page PTE swap\n"
-        "    /restore <addr>             Undo a safepatch (restore original PTE)\n\n"
+        "    /restore <addr>             Undo a safepatch (restore original PTE)\n"
+        "    /pte <addr> [--set-write] [--clear-nx] [--restore <val>]\n"
+        "                               Walk all 4 page-table levels; modify leaf PTE flags\n"
+        "    /rd64 <addr> [count]        Read 1-256 QWORDs from a kernel VA\n"
+        "    /wr64 <addr> <value>        Write a QWORD to a kernel VA (atomic if driver supports)\n"
+        "    /ptebase                    Diagnostic scan — find MmPteBase candidates in ntoskrnl\n"
+        "    /ptebase-set <value>        Manually set MmPteBase (use WinDbg to obtain value)\n\n"
         "  Timing:\n"
         "    /timedelta <pid> [ms]       Measure transient System handles to <pid>\n\n"
         "  Guard watchdog:\n"
@@ -195,6 +202,86 @@ static bool TryCommandHelp(const char* cmd) {
             "    drive    filter to a specific volume, e.g. /handles E or /handles E:\n\n"
             "  Output columns: PID  Process  Path\n\n"
             "  Flags: /json  -> JSON array of handle objects\n"
+        );
+        return true;
+    }
+    if (_stricmp(cmd, "pte") == 0) {
+        printf(
+            "/pte <addr> [--set-write] — walk all 4 page-table levels for a VA\n\n"
+            "  Resolves MmPteBase, then uses the PTE self-map to compute the kernel VA\n"
+            "  of each page-table entry (PML4E → PDPTE → PDE → PTE) and reads each one\n"
+            "  via RTCore64.  Decodes P/W/U/NX/G/A/D/PS flags and prints physical address.\n\n"
+            "  Handles large pages: PS=1 on PDPTE (1 GB) and PDE (2 MB).\n\n"
+            "  Flags (applied to the leaf entry — PTE for 4KB, PDE/PDPTE for large pages):\n"
+            "  --set-write          Set the W (writable) bit.\n"
+            "                       Useful before /patch to make a read-only page writable.\n"
+            "  --clear-nx           Clear the NX bit (make page executable).\n"
+            "  --restore <val>      Write an exact raw value back (undo a previous change).\n"
+            "                       <val> is the original raw PTE value shown by a prior walk.\n\n"
+            "  Flags can be combined: --set-write --clear-nx applies both.\n"
+            "  --restore overrides --set-write and --clear-nx if all three are given.\n\n"
+            "  A verify read-back is always printed after any write.\n\n"
+            "  Examples:\n"
+            "    /pte FFFFF8086A4114DB\n"
+            "    /pte FFFFF8086A4114DB --set-write\n"
+            "    /pte FFFFF8086A4114DB --clear-nx\n"
+            "    /pte FFFFF8086A4114DB --set-write --clear-nx\n"
+            "    /pte FFFFF8086A4114DB --restore 8A0000019C601025\n\n"
+            "  Requires MmPteBase.  If unavailable, run /ptebase or /ptebase-set first.\n"
+        );
+        return true;
+    }
+    if (_stricmp(cmd, "rd64") == 0) {
+        printf(
+            "/rd64 <addr> [count] — read 1-256 QWORDs from a kernel virtual address\n\n"
+            "  Reads raw 64-bit values from arbitrary kernel VAs via RTCore64.\n"
+            "  Useful for inspecting kernel variables, PTE entries, EPROCESS fields, etc.\n\n"
+            "  Arguments:\n"
+            "    addr    kernel VA in hex (e.g. fffff8086a000000)\n"
+            "    count   number of consecutive QWORDs to read (default 1, max 256)\n\n"
+            "  Output: one line per QWORD:  0x<addr>  =  0x<value>\n\n"
+            "  See also: /wr64 (write), /pte (decode page-table entry)\n"
+        );
+        return true;
+    }
+    if (_stricmp(cmd, "wr64") == 0) {
+        printf(
+            "/wr64 <addr> <value> — write a QWORD to a kernel virtual address\n\n"
+            "  Writes a 64-bit value to an arbitrary kernel VA via RTCore64.\n"
+            "  Attempts a single atomic 8-byte write (Wr64Atomic); falls back to\n"
+            "  hi-then-lo pair if the driver rejects Size=8.\n\n"
+            "  Arguments:\n"
+            "    addr    kernel VA in hex\n"
+            "    value   64-bit value in hex\n\n"
+            "  WARNING: Writing to arbitrary kernel addresses can cause an instant BSOD.\n"
+            "           Use /safepatch for code patches (PTE shadow-page method).\n"
+        );
+        return true;
+    }
+    if (_stricmp(cmd, "ptebase") == 0) {
+        printf(
+            "/ptebase — diagnostic scan for MmPteBase in ntoskrnl\n\n"
+            "  Scans ntoskrnl.exe .text for MOV r64,[RIP+imm32] instructions that\n"
+            "  reference the .data section (including BSS), counts references per target,\n"
+            "  and prints the top 32 candidates with their current runtime values.\n\n"
+            "  Candidates are validated: must be a kernel VA (0xFFFF...) and page-aligned.\n"
+            "  The winning candidate (first valid one) is automatically cached as MmPteBase.\n\n"
+            "  Use this when /safepatch or /pte reports 'MmPteBase unavailable'.\n"
+            "  If no candidate passes validation, use WinDbg + /ptebase-set to inject\n"
+            "  the value manually.\n"
+        );
+        return true;
+    }
+    if (_stricmp(cmd, "ptebase-set") == 0) {
+        printf(
+            "/ptebase-set <value> — manually override the cached MmPteBase value\n\n"
+            "  Skips the auto-scan entirely and sets MmPteBase to the given value.\n"
+            "  Persists until the process exits or /ptebase-set is called again.\n\n"
+            "  Arguments:\n"
+            "    value   MmPteBase address in hex (obtain from WinDbg: dq MmPteBase)\n\n"
+            "  Example:\n"
+            "    ObMaster /ptebase-set FFFFCE8000000000\n"
+            "    ObMaster /pte FFFFF8086A4114DB\n"
         );
         return true;
     }
@@ -467,6 +554,68 @@ int main(int argc, char* argv[]) {
         const char* vol = nextArg();
         if (!vol) { printf("[!] /unmount requires a drive letter\n"); g_drv->Close(); return 1; }
         CmdUnmount(vol[0]);
+    }
+    else if (_stricmp(cmd, "pte") == 0) {
+        const char* addrStr = nextArg(0);
+        if (!addrStr) {
+            printf("[!] Usage: /pte <hex_addr> [--set-write] [--clear-nx] [--restore <val>]\n");
+            g_drv->Close(); return 1;
+        }
+        bool    setWrite   = false;
+        bool    clearNx    = false;
+        DWORD64 restoreVal = 0;
+        for (int i = cmdIdx + 1; i < argc; i++) {
+            const char* a = argv[i];
+            if (_stricmp(a, "--set-write") == 0 || _stricmp(a, "set-write") == 0)
+                setWrite = true;
+            else if (_stricmp(a, "--clear-nx") == 0 || _stricmp(a, "clear-nx") == 0)
+                clearNx = true;
+            else if ((_stricmp(a, "--restore") == 0 || _stricmp(a, "restore") == 0) && i + 1 < argc)
+                restoreVal = strtoull(argv[++i], nullptr, 16);
+        }
+        CmdPte(strtoull(addrStr, nullptr, 16), setWrite, clearNx, restoreVal);
+    }
+    else if (_stricmp(cmd, "rd64") == 0) {
+        // Read one or more QWORDs from a kernel VA via RTCore64.
+        // Usage: /rd64 <addr> [count]
+        // count defaults to 1; each QWORD printed on its own line.
+        const char* addrStr  = nextArg(0);
+        const char* countStr = nextArg(1);
+        if (!addrStr) { printf("[!] Usage: /rd64 <hex_addr> [count]\n"); g_drv->Close(); return 1; }
+        DWORD64 addr  = strtoull(addrStr, nullptr, 16);
+        DWORD   count = countStr ? (DWORD)strtoul(countStr, nullptr, 10) : 1;
+        if (count == 0 || count > 256) count = 1;
+        for (DWORD i = 0; i < count; i++) {
+            DWORD64 va  = addr + (DWORD64)i * 8;
+            DWORD64 val = g_drv->Rd64(va);
+            printf("0x%016llX  =  0x%016llX\n", va, val);
+        }
+    }
+    else if (_stricmp(cmd, "wr64") == 0) {
+        const char* addrStr  = nextArg(0);
+        const char* valStr   = nextArg(1);
+        if (!addrStr || !valStr) {
+            printf("[!] Usage: /wr64 <hex_addr> <hex_value>\n");
+            g_drv->Close(); return 1;
+        }
+        DWORD64 addr = strtoull(addrStr, nullptr, 16);
+        DWORD64 val  = strtoull(valStr,  nullptr, 16);
+        bool atomic = g_drv->Wr64Atomic(addr, val);
+        printf("[+] Wr64 0x%016llX <- 0x%016llX  (%s)\n",
+               addr, val, atomic ? "ATOMIC 8B" : "hi-lo fallback");
+    }
+    else if (_stricmp(cmd, "ptebase") == 0) {
+        KUtil::BuildDriverCache();
+        CmdPteBaseScan();
+    }
+    else if (_stricmp(cmd, "ptebase-set") == 0) {
+        const char* valStr = nextArg();
+        if (!valStr) {
+            printf("[!] Usage: /ptebase-set <hex_value>\n");
+            g_drv->Close(); return 1;
+        }
+        DWORD64 val = strtoull(valStr, nullptr, 16);
+        SetMmPteBase(val);
     }
     else {
         if (g_jsonMode)

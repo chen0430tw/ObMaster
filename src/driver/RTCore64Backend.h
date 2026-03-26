@@ -10,6 +10,7 @@ public:
 
     DWORD ReadPrim (DWORD64 addr, DWORD size) override;
     void  WritePrim(DWORD64 addr, DWORD size, DWORD value) override;
+    bool  Wr64Atomic(DWORD64 addr, DWORD64 value) override;
 
 private:
     HANDLE hDev = INVALID_HANDLE_VALUE;

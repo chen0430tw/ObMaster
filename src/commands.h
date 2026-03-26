@@ -34,3 +34,6 @@ void CmdGuardAdd(DWORD64 addr);                              // /guard-add <addr
 void CmdGuardStart(int intervalMs);                          // /guard-start [ms]
 void CmdGuardStop();                                         // /guard-stop
 void CmdGuardList();                                         // /guard-list
+void CmdPte(DWORD64 va, bool setWrite = false,               // /pte <addr> [--set-write]
+            bool clearNx = false,                           //              [--clear-nx]
+            DWORD64 restoreVal = 0);                        //              [--restore <val>]

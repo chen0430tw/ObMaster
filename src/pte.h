@@ -30,6 +30,14 @@ void PteResetCache();
 // Get (cached) value of MmPteBase kernel variable
 DWORD64 GetMmPteBase();
 
+// Manually override MmPteBase (e.g. value obtained from WinDbg)
+// Skips the scan entirely; persists until PteResetCache() is called.
+void SetMmPteBase(DWORD64 val);
+
+// Run the reference-count scan and print all top-N candidates + their runtime values.
+// Does NOT update the cache — diagnostic only.
+void CmdPteBaseScan();
+
 // Kernel VA of the PTE that describes 'va' (works for any VA: user or kernel)
 // Returns 0 if MmPteBase unavailable
 DWORD64 PteVaOf(DWORD64 va);

@@ -33,6 +33,18 @@ public:
     void    Wr64(DWORD64 a, DWORD64 v) { Wr32(a, (DWORD)(v & 0xFFFFFFFF));
                                          Wr32(a+4, (DWORD)(v >> 32));           }
 
+    // Attempt a true 8-byte atomic write (single aligned QWORD store = CPU-atomic on x86-64).
+    // Returns true  → backend issued a genuine 8-byte write (fully atomic).
+    // Returns false → backend fell back to hi-then-lo pair (non-atomic but Present=1 throughout).
+    // The write is ALWAYS completed by the time this returns; the bool is diagnostic only.
+    virtual bool Wr64Atomic(DWORD64 a, DWORD64 v) {
+        // Default fallback: write high DWORD first, then low DWORD with Present=1.
+        // No Present=0 window, but a brief PA-inconsistency window remains.
+        Wr32(a + 4, (DWORD)(v >> 32));
+        Wr32(a,     (DWORD)(v & 0xFFFFFFFF));
+        return false;
+    }
+
     // Validate canonical kernel VA before reading (avoids driver crash on bad ptr)
     bool IsKernelVA(DWORD64 a) {
         return (a >= 0xFFFF800000000000ULL) && ((a >> 48) == 0xFFFF);

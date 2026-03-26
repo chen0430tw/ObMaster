@@ -166,20 +166,12 @@ void CmdSafePatch(DWORD64 addr, const char* hexStr) {
 
 fallback:
     if (!usedShadow) {
-        printf("[*] Shadow unavailable — using aligned Wr32 (no byte-by-byte writes)\n");
-        // Write as aligned DWORDs: at most two Wr32 per 4-byte boundary.
-        // For a 3-byte patch starting at an aligned address this is ONE call — safe.
-        DWORD64 alignedBase = addr & ~3ULL;
-        DWORD64 alignedEnd  = (addr + byteCount + 3) & ~3ULL;
-        for (DWORD64 waddr = alignedBase; waddr < alignedEnd; waddr += 4) {
-            DWORD cur = g_drv->Rd32(waddr);
-            DWORD newV = cur;
-            DWORD64 lo = (addr > waddr) ? addr - waddr : 0;
-            DWORD64 hi = std::min((DWORD64)4, addr + byteCount - waddr);
-            for (DWORD64 b = lo; b < hi; b++)
-                ((BYTE*)&newV)[b] = patchBytes[(waddr + b) - addr];
-            g_drv->Wr32(waddr, newV);
-        }
+        // Do NOT fall back to direct virtual write — kernel code pages have PTE.Write=0
+        // and any direct Wr32 will cause STOP 0xBE (ATTEMPTED_WRITE_TO_READONLY_MEMORY).
+        printf("[!] Shadow page setup failed — REFUSING direct write to avoid BSOD.\n");
+        printf("[!] Fix: ensure MmPteBase is resolved (check [pte] scan output above).\n");
+        if (shadowVA) { VirtualUnlock(shadowVA, 4096); VirtualFree(shadowVA, 0, MEM_RELEASE); }
+        return;
     }
 
     // ── Verify ────────────────────────────────────────────────────────────
