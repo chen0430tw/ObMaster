@@ -41,10 +41,11 @@ Process inspection, PPL bypass, privilege escalation, service/driver enumeration
 
 > **⚠ BSOD warning — `/ndisable`:** Zeroing a notify slot while the kernel or another driver holds a rundown reference to that `EX_CALLBACK_ROUTINE_BLOCK` can cause an immediate bugcheck. Always enumerate first with `/notify`, identify the target, then disable during a quiet window (no active callbacks in flight). Never use on `ntoskrnl.exe` or `WdFilter.sys` entries.
 
-### File Handles
+### Handle Operations
 | Command | Description |
 |---|---|
 | `/handles [drive]` | Enumerate all open file handles system-wide; optionally filter by volume (e.g. `/handles E`) |
+| `/handle-close <pid> <handle>` | Close a handle held by any process — uses `DuplicateHandle(DUPLICATE_CLOSE_SOURCE)` for normal processes; kernel `HANDLE_TABLE` walk + zero for `pid=4` (System) |
 
 ### Minifilters
 | Command | Description |
@@ -53,12 +54,53 @@ Process inspection, PPL bypass, privilege escalation, service/driver enumeration
 | `/flt-detach <filter> <drive>` | Force-detach a mandatory minifilter by zeroing `InstanceQueryTeardown` then calling `FilterDetachW` |
 | `/unmount <drive>` | Force dismount + physical USB eject — filesystem flush, volume offline, PnP safe removal |
 
+### Driver Operations
+| Command | Description |
+|---|---|
+| `/drv-load <path.sys>` | Load driver via HKCU registry + `NtLoadDriver` (no SCM / no UAC prompt) |
+| `/drv-unload <name> <drvobj_va>` | Force-unload a `NOT_STOPPABLE` or DKOM-hidden driver — patches `DriverUnload` to a `ret` stub then calls `sc stop` |
+| `/force-stop <name>` | Auto-find `DRIVER_OBJECT` (PsLoadedModuleList → `.data` scan) + patch `DriverUnload` + `NtUnloadDriver` |
+
+> **DKOM-hidden driver note:** If the target driver has removed itself from `PsLoadedModuleList` **and** `EnumDeviceDrivers` (e.g. ksafecenter64), `/force-stop` auto-discovery will fail. Use WinObjEx64 to read the `DRIVER_OBJECT` VA from `\Driver\<name>`, then:
+> 1. `/drv-unload <name> <drvobj_va>` — patches `DriverUnload` null → ret stub, calls `sc stop`
+> 2. `/force-stop <name>` — retries `NtUnloadDriver` (now succeeds since `DriverUnload` is patched)
+
+### Privilege / Token
+| Command | Description |
+|---|---|
+| `/elevate-pid <pid>` | Kernel token steal — write winlogon SYSTEM token pointer into target `EPROCESS.Token` |
+| `/enable-priv <privilege>` | Patch `SEP_TOKEN_PRIVILEGES.Present/Enabled` bitmask directly in kernel |
+
 ### Deep Scan
 | Command | Description |
 |---|---|
 | `/memscan <pid> [all]` | Compare all loaded DLL sections vs on-disk image; highlights patches/hooks (skips noisy sections by default) |
 | `/memrestore <pid> <dll> [section]` | Restore modified sections from disk via `WriteProcessMemory` |
 | `/watchfix <proc> <dll>[:<sec>] ...` | Watch for new instances of `<proc>` and auto-restore specified DLL sections on launch |
+
+### PTE / Memory
+| Command | Description |
+|---|---|
+| `/pte <addr> [--set-write] [--clear-nx] [--restore <val>]` | Walk 4-level page tables and display leaf PTE; optionally modify W/NX flags |
+| `/safepatch <addr> <hex>` | Patch kernel memory safely via shadow-page PTE swap (CoW-style, bypasses write-protect) |
+| `/restore <addr>` | Undo a `/safepatch`, restore original PTE mapping |
+| `/ptebase` | Run all `MmPteBase` discovery methods with full diagnostics |
+| `/ptebase-set <val>` | Manually override the cached `MmPteBase` value |
+| `/rd64 <addr> [count]` | Raw kernel QWORD read |
+| `/wr64 <addr> <val>` | Raw kernel QWORD write |
+
+### Guard Watchdog
+| Command | Description |
+|---|---|
+| `/guard-add <addr>` | Register a safepatch slot for watchdog monitoring |
+| `/guard-start [ms]` | Start watchdog thread (default interval: 500 ms) — re-applies patches if reverted |
+| `/guard-stop` | Stop watchdog thread |
+| `/guard-list` | List all monitored slots and their current state |
+
+### Timing
+| Command | Description |
+|---|---|
+| `/timedelta <pid> [ms]` | Measure transient System handles to a process (detects race-window handle injection) |
 
 ### Global flags
 | Flag | Description |
@@ -155,8 +197,17 @@ ObMaster
 │   ├── cmd_notify.cpp             /notify + /ndisable
 │   ├── cmd_runas.cpp              /runas system|ti
 │   ├── cmd_memscan.cpp            /memscan + /memrestore + /watchfix
-│   ├── cmd_handles.cpp            /handles
+│   ├── cmd_handles.cpp            /handles + /handle-close
 │   ├── cmd_flt.cpp                /flt + /flt-detach + /unmount
+│   ├── cmd_unload.cpp             /drv-load + /drv-unload + /force-stop
+│   ├── cmd_elevate.cpp            /elevate-pid + /enable-priv
+│   ├── cmd_handle_close.cpp       /handle-close (kernel path for pid=4)
+│   ├── pte.cpp                    MmPteBase discovery (10 methods) + PTE R/W
+│   ├── patch_store.cpp            safepatch slot store
+│   ├── cmd_pte.cpp                /pte + /safepatch + /restore + /ptebase*
+│   ├── cmd_safepatch.cpp          /safepatch high-level handler
+│   ├── cmd_guard.cpp              /guard-*
+│   ├── cmd_timedelta.cpp          /timedelta
 │   └── main.cpp
 ├── build/
 │   ├── build.bat                  Main build script
