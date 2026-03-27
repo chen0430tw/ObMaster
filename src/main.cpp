@@ -83,6 +83,8 @@ static void Usage(const char* prog) {
         "    /unmount <drive>               Force dismount + eject (like /kill for drives)\n"
         "    /drv-unload <name> <va>        Force-unload NOT_STOPPABLE driver (patch DriverUnload + sc stop)\n"
         "                                   Get <va> from WinDbg: !object \\Driver\\<name>\n"
+        "    /force-stop <name>             Stop driver via NtUnloadDriver, bypasses SCM error 1052\n"
+        "                                   No VA needed; if DriverUnload is NULL use /drv-unload instead\n"
         "    /elevate-pid <pid>             Kernel token steal: write winlogon SYSTEM token into target pid\n"
         "                                   Bypasses UAC entirely — use when consent.exe is stuck\n"
         "    /elevate-self [cmd]            fodhelper UAC bypass: load RTCore64 elevated, no consent dialog\n"
@@ -658,6 +660,16 @@ int main(int argc, char* argv[]) {
         }
         DWORD64 va = strtoull(vaStr, nullptr, 16);
         CmdForceUnload(name, va);
+    }
+    else if (_stricmp(cmd, "force-stop") == 0) {
+        const char* name = nextArg(0);
+        if (!name) {
+            printf("[!] Usage: /force-stop <service_name>\n");
+            printf("    Calls NtUnloadDriver directly, bypassing SCM error 1052\n");
+            printf("    If driver has no DriverUnload, use /drv-unload <name> <va> instead\n");
+            g_drv->Close(); return 1;
+        }
+        CmdForceStop(name);
     }
     else if (_stricmp(cmd, "elevate-pid") == 0) {
         const char* pidStr = nextArg(0);

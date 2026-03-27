@@ -43,11 +43,11 @@ cl.exe /nologo /O2 /MT /EHsc /std:c++17 /utf-8 ^
     "%SRC%\cmd_elevate.cpp" ^
     "%SRC%\cmd_handle_close.cpp" ^
     /Fe:"%OUT%" ^
-    /link advapi32.lib psapi.lib iphlpapi.lib ws2_32.lib fltlib.lib setupapi.lib cfgmgr32.lib ole32.lib ntdll.lib
+    /link advapi32.lib psapi.lib iphlpapi.lib ws2_32.lib fltlib.lib setupapi.lib cfgmgr32.lib ole32.lib ntdll.lib 2>build_err.txt
 
 if %ERRORLEVEL% == 0 (
     echo [+] Build OK: %~dp0%OUT%
 ) else (
-    echo [!] Build FAILED
+    echo [!] Build FAILED, errorlevel=%ERRORLEVEL%
 )
 endlocal

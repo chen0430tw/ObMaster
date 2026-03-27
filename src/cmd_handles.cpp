@@ -178,9 +178,11 @@ void CmdHandles(const char* filter) {
     int    count   = 0;
     bool   jsonFirst = true;
 
-    if (g_jsonMode)
+    if (g_jsonMode) {
+        char fdrStr[4] = { filterDrive, ':', '\0' };
         printf("{\"command\":\"handles\",\"filter\":%s,\"handles\":[\n",
-               filterDrive ? JEscape((std::string(1, filterDrive) + ":").c_str()).c_str() : "null");
+               filterDrive ? JEscape(fdrStr).c_str() : "null");
+    }
     else {
         printf("%-8s  %-24s  %s\n", "PID", "Process", "Path");
         printf("%s\n", std::string(120, '-').c_str());
