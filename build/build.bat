@@ -32,8 +32,18 @@ cl.exe /nologo /O2 /MT /EHsc /std:c++17 /utf-8 ^
     "%SRC%\cmd_memscan.cpp" ^
     "%SRC%\cmd_handles.cpp" ^
     "%SRC%\cmd_flt.cpp" ^
+    "%SRC%\cmd_patch.cpp" ^
+    "%SRC%\pte.cpp" ^
+    "%SRC%\patch_store.cpp" ^
+    "%SRC%\cmd_safepatch.cpp" ^
+    "%SRC%\cmd_timedelta.cpp" ^
+    "%SRC%\cmd_guard.cpp" ^
+    "%SRC%\cmd_pte.cpp" ^
+    "%SRC%\cmd_unload.cpp" ^
+    "%SRC%\cmd_elevate.cpp" ^
+    "%SRC%\cmd_handle_close.cpp" ^
     /Fe:"%OUT%" ^
-    /link advapi32.lib psapi.lib iphlpapi.lib ws2_32.lib fltlib.lib setupapi.lib cfgmgr32.lib
+    /link advapi32.lib psapi.lib iphlpapi.lib ws2_32.lib fltlib.lib setupapi.lib cfgmgr32.lib ole32.lib ntdll.lib
 
 if %ERRORLEVEL% == 0 (
     echo [+] Build OK: %~dp0%OUT%

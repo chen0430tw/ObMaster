@@ -47,3 +47,9 @@ PteInfo ReadPte(DWORD64 va);
 
 // Overwrite the PTE for 'va' with newPteVal (single Wr64 — atomicity on aligned addr)
 bool WritePte(DWORD64 va, DWORD64 newPteVal);
+
+// Check if 'va' is present in the PTE self-map (P bit = 1).
+// Returns false if MmPteBase is unknown, va is 0, or the page is not present.
+// Only reads the PTE entry, never dereferences 'va' itself — safe to call on
+// any kernel VA without risking BSOD from non-present pages.
+bool IsVaMapped(DWORD64 va);

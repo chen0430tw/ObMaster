@@ -52,9 +52,16 @@ public:
 
     bool SafeRd64(DWORD64 a, DWORD64& out) {
         if (!IsKernelVA(a)) return false;
+        if (a & 7) return false;  // RTCore64 QWORD reads must be 8-byte aligned
         out = Rd64(a);
         return IsKernelVA(out) || out == 0;
     }
+
+    // Physical memory mapping via MmMapIoSpace / MmUnmapIoSpace.
+    // Returns a kernel VA that maps 'size' bytes starting at physical 'pa'.
+    // Returns 0 on failure.  Call UnmapPhys when done.
+    virtual DWORD64 MapPhys  (DWORD64 pa, DWORD size) { (void)pa; (void)size; return 0; }
+    virtual void    UnmapPhys(DWORD64 va, DWORD size) { (void)va; (void)size; }
 };
 
 // Global backend pointer — set in main before any operation

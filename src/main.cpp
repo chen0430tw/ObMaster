@@ -73,11 +73,20 @@ static void Usage(const char* prog) {
         "    /notify [image|process|thread]  Enumerate Ps*NotifyRoutine arrays\n"
         "    /ndisable <fn_addr>             Zero EX_CALLBACK slot for matching entry\n\n"
         "  File handles:\n"
-        "    /handles [drive]               Enumerate open file handles system-wide (e.g. /handles E)\n\n"
+        "    /handles [drive]               Enumerate open file handles system-wide (e.g. /handles E)\n"
+        "    /handle-close <pid> <handle>   Close a handle in any process\n"
+        "                                   pid=4: kernel HANDLE_TABLE walk (WdFilter/ksafecenter64)\n"
+        "                                   others: DuplicateHandle CLOSE_SOURCE\n\n"
         "  Minifilters:\n"
         "    /flt [drive]                   Enumerate minifilter instances via kernel walk\n"
         "    /flt-detach <filter> <drive>   Force-detach mandatory minifilter (zeros teardown callback)\n"
-        "    /unmount <drive>               Force dismount + eject (like /kill for drives)\n\n"
+        "    /unmount <drive>               Force dismount + eject (like /kill for drives)\n"
+        "    /drv-unload <name> <va>        Force-unload NOT_STOPPABLE driver (patch DriverUnload + sc stop)\n"
+        "                                   Get <va> from WinDbg: !object \\Driver\\<name>\n"
+        "    /elevate-pid <pid>             Kernel token steal: write winlogon SYSTEM token into target pid\n"
+        "                                   Bypasses UAC entirely — use when consent.exe is stuck\n"
+        "    /elevate-self [cmd]            fodhelper UAC bypass: load RTCore64 elevated, no consent dialog\n"
+        "                                   Works as standard user even with Explorer deadlocked\n\n"
         "  Deep scan:\n"
         "    /memscan <pid> [all]           Compare DLL sections vs on-disk (default: skip .rdata/.data noise)\n"
         "    /memrestore <pid> <dll> [sec]  Restore sections from disk (default: skip noisy sections)\n"
@@ -333,6 +342,23 @@ int main(int argc, char* argv[]) {
         Usage(argv[0]); return 0;
     }
 
+    // /runas uses pure Win32 token duplication — no driver needed
+    if (_stricmp(cmd, "runas") == 0) {
+        // find first two non-flag args after cmd
+        int found = 0; const char* ra[2]{};
+        for (int i = cmdIdx + 1; i < argc && found < 2; i++) {
+            const char* f = stripDashes(argv[i]);
+            if (_stricmp(f,"json")==0||_stricmp(f,"quiet")==0||_stricmp(f,"debug")==0) continue;
+            ra[found++] = argv[i];
+        }
+        if (found < 2) {
+            printf("[!] Usage: /runas system|ti <cmdline>\n");
+            return 1;
+        }
+        CmdRunAs(ra[0], ra[1]);
+        return 0;
+    }
+
     // ── Per-command help: ObMaster /proc ? ────────────────────────────────────
     for (int i = cmdIdx + 1; i < argc; i++) {
         if (strcmp(argv[i], "?") == 0) {
@@ -346,6 +372,11 @@ int main(int argc, char* argv[]) {
     g_drv = &rtcore;
 
     if (!g_drv->Open()) {
+        // /elevate-self does not need the driver — allow it through
+        if (cmd && _stricmp(cmd, "elevate-self") == 0) {
+            CmdElevateSelf("");
+            return 0;
+        }
         if (g_jsonMode)
             printf("{\"error\":\"Cannot open %s (err %lu)\"}\n", g_drv->Name(), GetLastError());
         else {
@@ -616,6 +647,60 @@ int main(int argc, char* argv[]) {
         }
         DWORD64 val = strtoull(valStr, nullptr, 16);
         SetMmPteBase(val);
+    }
+    else if (_stricmp(cmd, "drv-unload") == 0) {
+        const char* name  = nextArg(0);
+        const char* vaStr = nextArg(1);
+        if (!name || !vaStr) {
+            printf("[!] Usage: /drv-unload <driver_name> <drvobj_va>\n");
+            printf("    Get drvobj_va from WinDbg: !object \\Driver\\<name>\n");
+            g_drv->Close(); return 1;
+        }
+        DWORD64 va = strtoull(vaStr, nullptr, 16);
+        CmdForceUnload(name, va);
+    }
+    else if (_stricmp(cmd, "elevate-pid") == 0) {
+        const char* pidStr = nextArg(0);
+        if (!pidStr) {
+            printf("[!] Usage: /elevate-pid <pid>\n");
+            printf("    Writes winlogon SYSTEM token into target pid via kernel R/W\n");
+            g_drv->Close(); return 1;
+        }
+        DWORD pid = (DWORD)strtoul(pidStr, nullptr, 10);
+        KUtil::BuildDriverCache();
+        CmdElevatePid(pid);
+    }
+    else if (_stricmp(cmd, "enable-priv") == 0) {
+        const char* priv = nextArg(0);
+        if (!priv) { printf("[!] Usage: /enable-priv <privilege_name>\n"); g_drv->Close(); return 1; }
+        KUtil::BuildDriverCache();
+        CmdEnablePriv(priv);
+    }
+    else if (_stricmp(cmd, "drv-load") == 0) {
+        const char* path = nextArg(0);
+        if (!path) { printf("[!] Usage: /drv-load <path\\to\\driver.sys>\n"); g_drv->Close(); return 1; }
+        KUtil::BuildDriverCache();
+        CmdDrvLoad(path);
+    }
+    else if (_stricmp(cmd, "handle-close") == 0) {
+        const char* pidStr = nextArg(0);
+        const char* hStr   = nextArg(1);
+        if (!pidStr || !hStr) {
+            printf("[!] Usage: /handle-close <pid> <handle_hex>\n");
+            printf("    pid=4 uses kernel HANDLE_TABLE walk; others use DuplicateHandle.\n");
+            g_drv->Close(); return 1;
+        }
+        DWORD   pid = (DWORD)strtoul(pidStr, nullptr, 10);
+        DWORD64 h   = strtoull(hStr, nullptr, 16);
+        KUtil::BuildDriverCache();
+        CmdHandleClose(pid, h);
+    }
+    else if (_stricmp(cmd, "elevate-self") == 0) {
+        // Does NOT need the driver — fodhelper bypass works as standard user
+        g_drv->Close();
+        const char* extra = nextArg(0);  // optional extra command to run after sc start
+        CmdElevateSelf(extra ? extra : "");
+        return 0;
     }
     else {
         if (g_jsonMode)

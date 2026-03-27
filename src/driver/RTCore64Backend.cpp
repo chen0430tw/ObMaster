@@ -82,3 +82,47 @@ bool RTCore64Backend::Wr64Atomic(DWORD64 addr, DWORD64 value) {
     WritePrim(addr,     4, (DWORD)(value & 0xFFFFFFFF));
     return false;
 }
+
+// RTCore64 IOCTL 0x80002050 — map a physical page via MmMapIoSpace.
+//
+// Struct layout (from binary analysis of RTCore64.sys handler at func+0x3A0):
+//   +0x00  QWORD  PhysAddr  (input  — MOV RCX, [RBX])
+//   +0x08  QWORD  _pad
+//   +0x10  DWORD  Size      (input  — MOV EDX, [RBX+0x10])
+//   +0x14  DWORD  _pad2
+//   +0x18  QWORD  _pad3
+//   +0x20  QWORD  VirtAddr  (output — LEA R8, [RBX+0x20]; written by driver)
+// Total: 0x28 bytes minimum.
+DWORD64 RTCore64Backend::MapPhys(DWORD64 pa, DWORD size) {
+    struct Req {
+        DWORD64 PhysAddr;   // +0x00
+        DWORD64 _pad;       // +0x08
+        DWORD   Size;       // +0x10
+        DWORD   _pad2;      // +0x14
+        DWORD64 _pad3;      // +0x18
+        DWORD64 VirtAddr;   // +0x20  OUTPUT
+    } req{};
+    req.PhysAddr = pa;
+    req.Size     = size;
+    DWORD n;
+    DeviceIoControl(hDev, IOCTL_MAP_PHYS,
+                    &req, sizeof(req), &req, sizeof(req), &n, nullptr);
+    if (!IsKernelVA(req.VirtAddr)) return 0;
+    return req.VirtAddr;
+}
+
+// RTCore64 IOCTL 0x80002054 — unmap a previously mapped physical page.
+// Handler reads VirtAddr from [RBX+0x00] (first QWORD).
+void RTCore64Backend::UnmapPhys(DWORD64 va, DWORD size) {
+    struct Req {
+        DWORD64 VirtAddr;   // +0x00
+        DWORD64 _pad;       // +0x08
+        DWORD   Size;       // +0x10
+        DWORD   _pad2;      // +0x14
+    } req{};
+    req.VirtAddr = va;
+    req.Size     = size;
+    DWORD n;
+    DeviceIoControl(hDev, IOCTL_UNMAP_PHYS,
+                    &req, sizeof(req), &req, sizeof(req), &n, nullptr);
+}

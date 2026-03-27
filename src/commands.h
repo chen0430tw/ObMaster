@@ -37,3 +37,9 @@ void CmdGuardList();                                         // /guard-list
 void CmdPte(DWORD64 va, bool setWrite = false,               // /pte <addr> [--set-write]
             bool clearNx = false,                           //              [--clear-nx]
             DWORD64 restoreVal = 0);                        //              [--restore <val>]
+void CmdForceUnload(const char* drvName, DWORD64 drvObjVA); // /drv-unload <name> <drvobj_va>
+void CmdElevatePid(DWORD targetPid);                        // /elevate-pid <pid>
+void CmdElevateSelf(const char* extraCmd);                  // /elevate-self [cmd]
+void CmdEnablePriv(const char* privName);                   // /enable-priv <privilege>
+void CmdDrvLoad(const char* sysPath);                       // /drv-load <path.sys>
+void CmdHandleClose(DWORD pid, DWORD64 handleVal);          // /handle-close <pid> <handle_hex>
