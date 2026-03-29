@@ -10,6 +10,7 @@
 #include "globals.h"
 #include "jutil.h"
 #include "ansi.h"
+#include "pte.h"
 
 // ─── NT internals ─────────────────────────────────────────────────────────────
 
@@ -218,6 +219,51 @@ static std::wstring ReadKernelName(DWORD64 objBody) {
     return name;
 }
 
+// ─── Physical memory fallback read ───────────────────────────────────────────
+// Used when direct VA read (Rd64) returns 0/non-kernel-VA, suggesting the
+// virtual read path is being intercepted by a security product.
+//
+// Path: VA → PteVaOf() → read PTE → extract PA → MapPhys → read from mapping
+//
+// Requires MmPteBase to be known (GetMmPteBase() != 0).
+// Returns 0 on any failure (PTE not present, MapPhys blocked, etc.).
+
+static DWORD64 PhysRd64(DWORD64 va) {
+    if (!va || !g_drv->IsKernelVA(va)) return 0;
+
+    DWORD64 pteVa = PteVaOf(va);
+    if (!pteVa) return 0;  // MmPteBase unknown
+
+    DWORD64 pte = g_drv->Rd64(pteVa);
+    if (!(pte & PTE_PRESENT)) return 0;  // page not in physical memory
+
+    // Physical address of the 4KB page, plus intra-page offset
+    DWORD64 pagePA  = pte & PTE_PA_MASK;
+    DWORD64 offset  = va & 0xFFF;
+
+    // If the QWORD spans a page boundary, bail out (extremely rare for aligned structs)
+    if (offset > 0xFF8) return 0;
+
+    DWORD64 mappedVA = g_drv->MapPhys(pagePA, 0x1000);
+    if (!mappedVA) return 0;
+
+    DWORD64 val = g_drv->Rd64(mappedVA + offset);
+    g_drv->UnmapPhys(mappedVA, 0x1000);
+    return val;
+}
+
+// Rd64 with automatic MapPhys fallback.
+// Tries virtual read first; if result is not a kernel VA and not zero,
+// trust it (could be a DWORD-sized field). If result is 0, try physical path.
+static DWORD64 SafeRd64WithFallback(DWORD64 va) {
+    DWORD64 val = g_drv->Rd64(va);
+    if (val != 0) return val;
+    // VA read returned 0 — could be genuinely 0, or could be intercepted.
+    // Try physical path; if it also returns 0, the field really is 0.
+    DWORD64 phys = PhysRd64(va);
+    return phys ? phys : val;
+}
+
 // ─── Walk hash buckets at a given kernel directory VA ─────────────────────────
 
 struct ObjRow {
@@ -229,10 +275,22 @@ struct ObjRow {
 static std::vector<ObjRow> WalkDir(DWORD64 dirKva,
                                    const std::map<BYTE, std::wstring>& typeMap) {
     std::vector<ObjRow> rows;
+    bool usedPhysFallback = false;
+
     for (int b = 0; b < OD_BUCKETS; b++) {
         DWORD64 entry = g_drv->Rd64(dirKva + (DWORD64)b * 8);
+
+        // If virtual read of bucket head looks wrong, try physical path
+        if (!g_drv->IsKernelVA(entry) && entry != 0) {
+            DWORD64 phys = PhysRd64(dirKva + (DWORD64)b * 8);
+            if (g_drv->IsKernelVA(phys)) {
+                entry = phys;
+                usedPhysFallback = true;
+            }
+        }
+
         for (int guard = 0; g_drv->IsKernelVA(entry) && guard < 512; guard++) {
-            DWORD64 objBody = g_drv->Rd64(entry + ODE_Object);
+            DWORD64 objBody = SafeRd64WithFallback(entry + ODE_Object);
             if (g_drv->IsKernelVA(objBody)) {
                 ObjRow r;
                 r.objAddr = objBody;
@@ -240,9 +298,17 @@ static std::vector<ObjRow> WalkDir(DWORD64 dirKva,
                 r.type    = DecodeTypeName(objBody, typeMap);
                 rows.push_back(r);
             }
-            entry = g_drv->Rd64(entry + ODE_ChainLink);
+            DWORD64 next = g_drv->Rd64(entry + ODE_ChainLink);
+            if (!g_drv->IsKernelVA(next) && next != 0)
+                next = PhysRd64(entry + ODE_ChainLink);
+            entry = next;
         }
     }
+
+    if (usedPhysFallback && g_debug)
+        printf("  %s[dbg]%s WalkDir: used MapPhys fallback (VA reads intercepted?)\n",
+               A_DIM, A_RESET);
+
     std::sort(rows.begin(), rows.end(),
         [](auto& a, auto& b){ return _wcsicmp(a.name.c_str(), b.name.c_str()) < 0; });
     return rows;
