@@ -1182,3 +1182,36 @@ ObMaster.exe /objdir --kva <Driver_dir_kva>
 ObMaster.exe /drv-unload <name> <DRIVER_OBJECT_VA>
 ```
 
+---
+
+### ⚠️ 为什么不能对 ksafecenter64 使用 `/safepatch`
+
+在此次实战之前曾尝试过 `/safepatch` 方案来 patch ksafecenter64 代码，结果导致多次 BSOD（详见 2026-03-26 BSOD 分析报告）。原因如下：
+
+#### 根因 1：代码页 PTE.Write=0（W^X 保护）
+
+ksafecenter64 的代码页 PTE 没有 Write 位。`/safepatch` 的影子页机制需要先修改 PTE 将目标页变为可写，但：
+
+- 若 MmPteBase 解析失败（返回 0）→ `Rd64(0)` → RTCore64 读地址 0 → **STOP 0x3B ACCESS_VIOLATION**
+- 若 PTE 修改时产生 Present=0 竞态窗口 → 其他 CPU 访问该页 → **STOP 0x50 PAGE_FAULT_IN_NONPAGED_AREA**
+
+#### 根因 2：ksafecenter64 的 DKOM 行为干扰 MmPteBase 扫描
+
+ksafecenter64 加载后会修改自身在内核中的可见性（DKOM），导致 `/ptebase` 扫描
+ntoskrnl `.data` 引用计数时结果不稳定，无法可靠定位 MmPteBase。
+
+#### 根因 3：驱动代码页属于非分页内存
+
+即使 PTE 修改成功，ksafecenter64 代码在多核环境下仍在运行。
+影子页切换瞬间（新 PTE 写入 → TLB 失效广播完成之间）存在不可消除的竞态窗口。
+
+#### 结论
+
+| 方案 | 对 ksafecenter64 是否可用 | 原因 |
+|------|--------------------------|------|
+| `/patch` | ❌ BSOD | 直接 Wr8 写只读页，STOP 0xBE |
+| `/safepatch` | ❌ BSOD 风险高 | PTE 操作 + MmPteBase 不稳定 + 多核竞态 |
+| `/drv-unload` + `/objdir --kva` | ✅ 安全 | 绕过 DACL，patch DriverUnload 为 ret stub |
+
+**正确思路：不要试图 patch 一个 DKOM 驱动的代码，直接卸载它。**
+
