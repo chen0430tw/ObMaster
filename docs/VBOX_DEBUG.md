@@ -1093,3 +1093,92 @@ ObMaster.exe /drv-unload <name> <DRIVER_OBJECT_VA>
 ObMaster.exe /force-stop <name>
 ```
 
+---
+
+## 实测记录（2026-03-30）
+
+### 背景
+
+上次（2026-03-27）需要借助 WinObjEx64 手动取 DRIVER_OBJECT VA。
+本次新增 `/objdir --kva` 命令，实现全程 ObMaster 自给自足，无需外部工具。
+
+### 测试环境
+
+- Windows 10 22H2 build 19045.7058（重启后全新地址）
+- ksafecenter64.sys 已加载，DKOM 隐藏（不在 PsLoadedModuleList）
+- ObMaster.exe + RTCore64 backend
+
+### 执行流程
+
+**Step 1：`/force-stop ksafecenter64`（确认失败）**
+
+```
+[!] NtUnloadDriver failed: 0xC0000010 STATUS_INVALID_DEVICE_REQUEST
+[!] KLDR not in PsLoadedModuleList (DKOM-hidden) — trying .data scan
+[!] Auto-discovery failed.
+    Use /drv-unload ksafecenter64 <drvobj_va>
+```
+
+**Step 2：`/objdir \` — 从根命名空间拿 `\Driver` 目录的 KVA**
+
+```
+ObMaster /objdir \
+→  Driver   Directory   0xffffcd0dc901c060   0xffffcd0dc901c030
+```
+
+`\Driver` 目录无法被用户态 `NtOpenDirectoryObject` 打开（DACL 拒绝），
+但 hash bucket 地址已拿到，可直接走内核读。
+
+**Step 3：`/objdir --kva ffffcd0dc901c060` — 绕过 DACL 枚举 `\Driver`**
+
+```
+ObMaster /objdir --kva ffffcd0dc901c060
+→  ksafecenter64   Driver   0xffffa50e75f0b570   0xffffa50e75f0b540
+```
+
+DKOM 把 ksafecenter64 从 `PsLoadedModuleList` 摘链，但 Object Directory
+hash bucket 只要对象存在就必须在链里，RTCore64 直接读内核内存可以拿到。
+
+**Step 4：`/drv-unload ksafecenter64 ffffa50e75f0b570`（提权运行）**
+
+```
+[+] DRIVER_OBJECT signature OK (0x01500004)
+[*] DriverUnload (+0x068) = 0x0000000000000000      ← 确认为 NULL
+[+] ret stub found: 0xFFFFF80321402A54  (xor eax,eax; ret in ntoskrnl)
+[+] DriverUnload patched: NULL → 0xFFFFF80321402A54
+[+] Stop accepted — dwCurrentState: 1
+[+] Driver is STOPPED
+```
+
+**验证：** WinObjEx64 的 `\Driver\` 目录中 `ksafecenter64` 条目消失。
+
+### 对比两次流程
+
+| 步骤 | 2026-03-27 | 2026-03-30 |
+|------|------------|------------|
+| 取 DRIVER_OBJECT VA | WinObjEx64 GUI（外部工具） | `/objdir \ ` + `/objdir --kva`（自给自足） |
+| patch DriverUnload | `/drv-unload` | `/drv-unload` |
+| 卸载 | `/force-stop` | 已在 `/drv-unload` 内完成 |
+
+### 关键结论
+
+```
+DKOM 能藏：  PsLoadedModuleList → 所有遍历模块列表的工具（包括 WinObjEx64 /drivers 视图）
+DKOM 藏不住：\Driver hash bucket → /objdir --kva 直接读内核内存
+```
+
+### 正确的全自动流程（DKOM 驱动，无需外部工具）
+
+```bash
+# 1. 从根命名空间找 \Driver 目录 KVA
+ObMaster.exe /objdir \
+#   记下 Driver 条目的 Object Addr（如 ffffcd0dc901c060）
+
+# 2. 绕过 DACL 枚举 \Driver，找目标驱动 DRIVER_OBJECT VA
+ObMaster.exe /objdir --kva <Driver_dir_kva>
+#   记下目标驱动的 Object Addr（如 ffffa50e75f0b570）
+
+# 3. patch DriverUnload + sc stop
+ObMaster.exe /drv-unload <name> <DRIVER_OBJECT_VA>
+```
+
