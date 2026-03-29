@@ -54,6 +54,12 @@ Process inspection, PPL bypass, privilege escalation, service/driver enumeration
 | `/flt-detach <filter> <drive>` | Force-detach a mandatory minifilter by zeroing `InstanceQueryTeardown` then calling `FilterDetachW` |
 | `/unmount <drive>` | Force dismount + physical USB eject — filesystem flush, volume offline, PnP safe removal |
 
+### Object Namespace
+| Command | Description |
+|---|---|
+| `/objdir [path]` | Enumerate NT object directory; shows kernel Object Addr + Header Addr for each entry. Default path: `\` |
+| `/objdir --kva <addr>` | Walk directory hash buckets at a known kernel VA — bypasses DACL (use for `\Driver`, `\Device`, etc.) |
+
 ### Driver Operations
 | Command | Description |
 |---|---|
@@ -61,9 +67,22 @@ Process inspection, PPL bypass, privilege escalation, service/driver enumeration
 | `/drv-unload <name> <drvobj_va>` | Force-unload a `NOT_STOPPABLE` or DKOM-hidden driver — patches `DriverUnload` to a `ret` stub then calls `sc stop` |
 | `/force-stop <name>` | Auto-find `DRIVER_OBJECT` (PsLoadedModuleList → `.data` scan) + patch `DriverUnload` + `NtUnloadDriver` |
 
-> **DKOM-hidden driver note:** If the target driver has removed itself from `PsLoadedModuleList` **and** `EnumDeviceDrivers` (e.g. ksafecenter64), `/force-stop` auto-discovery will fail. Use WinObjEx64 to read the `DRIVER_OBJECT` VA from `\Driver\<name>`, then:
-> 1. `/drv-unload <name> <drvobj_va>` — patches `DriverUnload` null → ret stub, calls `sc stop`
-> 2. `/force-stop <name>` — retries `NtUnloadDriver` (now succeeds since `DriverUnload` is patched)
+> **DKOM-hidden driver note:** If the target driver has removed itself from `PsLoadedModuleList` **and** `EnumDeviceDrivers` (e.g. ksafecenter64), `/force-stop` auto-discovery will fail. The driver object still lives in the `\Driver` Object Directory hash bucket — use `/objdir` to find it:
+>
+> ```
+> # Step 1 — get \Driver directory KVA from root namespace
+> ObMaster /objdir \
+>   → note Object Addr of "Driver" entry (e.g. ffffcd0dc901c060)
+>
+> # Step 2 — walk \Driver directly via kernel, bypassing DACL
+> ObMaster /objdir --kva ffffcd0dc901c060
+>   → note Object Addr of target driver (e.g. ffffa50e75f0b570)
+>
+> # Step 3 — patch DriverUnload + sc stop
+> ObMaster /drv-unload <name> ffffa50e75f0b570
+> ```
+>
+> `/objdir --kva` reads hash buckets directly via RTCore64 — DKOM cannot hide from this because the object must remain in the namespace as long as it exists.
 
 ### Privilege / Token
 | Command | Description |
