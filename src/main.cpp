@@ -93,6 +93,9 @@ static void Usage(const char* prog) {
         "    /memscan <pid> [all]           Compare DLL sections vs on-disk (default: skip .rdata/.data noise)\n"
         "    /memrestore <pid> <dll> [sec]  Restore sections from disk (default: skip noisy sections)\n"
         "    /watchfix <proc> <dll> [sec]   Poll for new instances of <proc>, auto-restore on each launch\n\n"
+        "  Object namespace:\n"
+        "    /objdir [path]                 Enumerate object directory; show kernel addresses\n"
+        "                                   Default path: \\  (root)\n\n"
         "  Per-command help:\n"
         "    %s /<command> ?\n\n"
         "Note: Requires RTCore64.sys running. Install via: sc create RTCore64 ...\n",
@@ -706,6 +709,21 @@ int main(int argc, char* argv[]) {
         DWORD64 h   = strtoull(hStr, nullptr, 16);
         KUtil::BuildDriverCache();
         CmdHandleClose(pid, h);
+    }
+    else if (_stricmp(cmd, "objdir") == 0) {
+        const char* dirPath = nextArg(0);
+        DWORD64 kva = 0;
+        // Check for --kva <addr>
+        for (int i = cmdIdx + 1; i < argc - 1; i++) {
+            if (_stricmp(argv[i], "--kva") == 0 || _stricmp(argv[i], "-kva") == 0) {
+                kva = strtoull(argv[i + 1], nullptr, 16);
+                break;
+            }
+        }
+        if (kva)
+            CmdObjDir("", kva);
+        else
+            CmdObjDir(dirPath ? dirPath : "\\");
     }
     else if (_stricmp(cmd, "elevate-self") == 0) {
         // Does NOT need the driver — fodhelper bypass works as standard user
