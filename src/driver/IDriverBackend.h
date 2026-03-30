@@ -45,9 +45,11 @@ public:
         return false;
     }
 
-    // Validate canonical kernel VA before reading (avoids driver crash on bad ptr)
+    // Validate canonical kernel VA before reading (avoids driver crash on bad ptr).
+    // Upper bound 0xFFFFFE0000000000: excludes PTE space / near-max addresses
+    // that would cause RTCore64 to fault (e.g. 0xFFFFFFFFFFFFFFFC + offset wraps).
     bool IsKernelVA(DWORD64 a) {
-        return (a >= 0xFFFF800000000000ULL) && ((a >> 48) == 0xFFFF);
+        return (a >= 0xFFFF800000000000ULL) && (a <= 0xFFFFFE0000000000ULL);
     }
 
     bool SafeRd64(DWORD64 a, DWORD64& out) {
