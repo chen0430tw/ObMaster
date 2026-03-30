@@ -282,6 +282,10 @@ int CmdHandleScan(DWORD pid, DWORD64 accessMask, DWORD targetPid, bool doClose,
         if (c->targetObjHdr) {
             if (decoded != c->targetObjHdr) return true;
         } else if (c->dkomFallback) {
+            // Valid kernel pool range: 0xFFFF800000000000 – 0xFFFFFE0000000000
+            // Anything above 0xFFFFFE0000000000 is system/HAL/PTE space — not a pool object.
+            // (decoded + 0x30) must also not wrap past 0xFFFFFFFFFFFFFFFF.
+            if (decoded < 0xFFFF800000000000ULL || decoded > 0xFFFFFE0000000000ULL) return true;
             DWORD64 candidateEP  = decoded + 0x30;
             DWORD   candidatePid = (DWORD)g_drv->Rd64(candidateEP + KUtil::EP_UniqueProcessId);
             if (candidatePid != c->targetPid) return true;
