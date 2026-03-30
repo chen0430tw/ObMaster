@@ -44,4 +44,6 @@ void CmdElevateSelf(const char* extraCmd);                  // /elevate-self [cm
 void CmdEnablePriv(const char* privName);                   // /enable-priv <privilege>
 void CmdDrvLoad(const char* sysPath);                       // /drv-load <path.sys>
 void CmdHandleClose(DWORD pid, DWORD64 handleVal);          // /handle-close <pid> <handle_hex>
+void CmdHandleScan(DWORD pid, DWORD64 accessMask, bool doClose); // /handle-scan <pid> [--access <mask>] [--close]
+void CmdDrvZombie(DWORD64 drvObjVA);                            // /drv-zombie <drvobj_va>
 void CmdObjDir(const char* path, DWORD64 kvaOverride = 0);  // /objdir [path] [--kva <addr>]

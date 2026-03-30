@@ -76,7 +76,10 @@ static void Usage(const char* prog) {
         "    /handles [drive]               Enumerate open file handles system-wide (e.g. /handles E)\n"
         "    /handle-close <pid> <handle>   Close a handle in any process\n"
         "                                   pid=4: kernel HANDLE_TABLE walk (WdFilter/ksafecenter64)\n"
-        "                                   others: DuplicateHandle CLOSE_SOURCE\n\n"
+        "                                   others: DuplicateHandle CLOSE_SOURCE\n"
+        "    /handle-scan  <pid> [--access <mask>] [--close]\n"
+        "                                   Walk pid's kernel HANDLE_TABLE; list/close all entries\n"
+        "                                   matching access mask (default: 0x1fffff PROCESS_ALL_ACCESS)\n\n"
         "  Minifilters:\n"
         "    /flt [drive]                   Enumerate minifilter instances via kernel walk\n"
         "    /flt-detach <filter> <drive>   Force-detach mandatory minifilter (zeros teardown callback)\n"
@@ -85,6 +88,8 @@ static void Usage(const char* prog) {
         "                                   Get <va> from WinDbg: !object \\Driver\\<name>\n"
         "    /force-stop <name>             Stop driver via NtUnloadDriver, bypasses SCM error 1052\n"
         "                                   No VA needed; if DriverUnload is NULL use /drv-unload instead\n"
+        "    /drv-zombie <drvobj_va>        Diagnose STOP_PENDING zombie: dump OBJECT_HEADER PointerCount,\n"
+        "                                   DeviceObject chain, refcount breakdown, and unblock advice\n"
         "    /elevate-pid <pid>             Kernel token steal: write winlogon SYSTEM token into target pid\n"
         "                                   Bypasses UAC entirely — use when consent.exe is stuck\n"
         "    /elevate-self [cmd]            fodhelper UAC bypass: load RTCore64 elevated, no consent dialog\n"
@@ -709,6 +714,38 @@ int main(int argc, char* argv[]) {
         DWORD64 h   = strtoull(hStr, nullptr, 16);
         KUtil::BuildDriverCache();
         CmdHandleClose(pid, h);
+    }
+    else if (_stricmp(cmd, "handle-scan") == 0) {
+        const char* pidStr = nextArg(0);
+        if (!pidStr) {
+            printf("[!] Usage: /handle-scan <pid> [--access <mask_hex>] [--close]\n");
+            printf("    Walk <pid>'s kernel HANDLE_TABLE; list entries matching access mask.\n");
+            printf("    Default mask: 0x1fffff (PROCESS_ALL_ACCESS). --close: zero each entry.\n");
+            g_drv->Close(); return 1;
+        }
+        DWORD   scanPid    = (DWORD)strtoul(pidStr, nullptr, 10);
+        DWORD64 accessMask = 0;
+        bool    doClose    = false;
+        for (int i = cmdIdx + 1; i < argc; i++) {
+            if (_stricmp(argv[i], "--close") == 0 || _stricmp(argv[i], "-close") == 0)
+                doClose = true;
+            else if ((_stricmp(argv[i], "--access") == 0 || _stricmp(argv[i], "-access") == 0) && i + 1 < argc)
+                accessMask = strtoull(argv[++i], nullptr, 16);
+        }
+        KUtil::BuildDriverCache();
+        CmdHandleScan(scanPid, accessMask, doClose);
+    }
+    else if (_stricmp(cmd, "drv-zombie") == 0) {
+        const char* vaStr = nextArg(0);
+        if (!vaStr) {
+            printf("[!] Usage: /drv-zombie <drvobj_va>\n");
+            printf("    Diagnose why a driver is stuck in STOP_PENDING.\n");
+            printf("    Get drvobj_va from: ObMaster /objdir \\Driver\n");
+            g_drv->Close(); return 1;
+        }
+        DWORD64 va = strtoull(vaStr, nullptr, 16);
+        KUtil::BuildDriverCache();
+        CmdDrvZombie(va);
     }
     else if (_stricmp(cmd, "objdir") == 0) {
         const char* dirPath = nextArg(0);
