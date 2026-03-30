@@ -21,11 +21,13 @@ if (-not (Test-Path $OBM))    { Write-Error "ObMaster not found: $OBM";    exit 
 if (-not (Test-Path $VBOXVM)) { Write-Error "VirtualBoxVM not found";       exit 1 }
 
 # ---------------------------------------------------------------------------
-# Close all PROCESS_ALL_ACCESS handles in PID 4 via ObMaster kernel walk
+# Close PROCESS_ALL_ACCESS handles in PID 4 pointing to a specific target PID
 # Returns number of handles actually zeroed
 # ---------------------------------------------------------------------------
-function Close-KernelHandles {
-    $out = & $OBM /quiet /handle-scan 4 --close 2>&1
+function Close-KernelHandles([int]$TargetPid) {
+    $args = @('/quiet', '/handle-scan', '4', '--close')
+    if ($TargetPid -gt 0) { $args += @('--target-pid', "$TargetPid") }
+    $out = & $OBM @args 2>&1
     $found  = ($out | Select-String '\[\+\] h=').Count
     $closed = ($out | Select-String '\[x\] h=').Count
     if ($found -gt 0) {
@@ -57,10 +59,8 @@ Write-Host ""
 for ($round = 1; $round -le $Rounds; $round++) {
     Write-Host "--- Round $round/$Rounds ---" -ForegroundColor Green
 
-    # 1. Pre-clean: close any leftover evil handles before launch
-    Write-Host "[1] Pre-launch: closing existing PID-4 PROCESS_ALL_ACCESS handles..."
-    $pre = Close-KernelHandles
-    Write-Host "    Pre-closed: $pre"
+    # 1. Pre-clean: no target PID yet, so skip (can't close without knowing VBox PID)
+    Write-Host "[1] Pre-launch check skipped (VBox not running yet)"
 
     # 2. Launch VirtualBox (non-blocking)
     Write-Host "[2] Launching VirtualBox --startvm $VmName"
@@ -73,12 +73,12 @@ for ($round = 1; $round -le $Rounds; $round++) {
     }
     Write-Host "    PID: $($vp.Id)"
 
-    # 3. Spin-close loop via ObMaster kernel HANDLE_TABLE walk
-    Write-Host "[3] Spin-close loop for ${SpinMs}ms (100ms interval)..."
+    # 3. Spin-close loop: only target handles pointing to VBox's EPROCESS
+    Write-Host "[3] Spin-close loop for ${SpinMs}ms (100ms interval, target-pid=$($vp.Id))..."
     $totalClosed = 0
     $spinEnd = (Get-Date).AddMilliseconds($SpinMs)
     while ((Get-Date) -lt $spinEnd -and -not $vp.HasExited) {
-        $n = Close-KernelHandles
+        $n = Close-KernelHandles -TargetPid $vp.Id
         if ($n -gt 0) {
             $totalClosed += $n
             $ms = [int]$sw.ElapsedMilliseconds
