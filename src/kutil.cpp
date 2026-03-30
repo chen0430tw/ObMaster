@@ -180,6 +180,62 @@ std::vector<ProcessEntry> EnumProcesses() {
     return result;
 }
 
+// NtQSI fallback: open a handle to target pid, then find our handle in the
+// NtQuerySystemInformation table — the Object field IS the EPROCESS address.
+// Used when ksafecenter DKOM-hides the process from ActiveProcessLinks.
+static DWORD64 FindEPROCESS_NtQsi(DWORD pid) {
+    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hProc) return 0;
+
+    typedef LONG (WINAPI *PNtQSI)(ULONG, PVOID, ULONG, PULONG);
+    static auto NtQSI = (PNtQSI)GetProcAddress(
+        GetModuleHandleA("ntdll.dll"), "NtQuerySystemInformation");
+    if (!NtQSI) { CloseHandle(hProc); return 0; }
+
+    // SystemExtendedHandleInformation = 64
+    ULONG bufSize = 0x20000;
+    std::vector<BYTE> buf;
+    ULONG retSize = 0;
+    LONG st;
+    do {
+        buf.resize(bufSize);
+        st = NtQSI(64, buf.data(), bufSize, &retSize);
+        if (st == (LONG)0x80000005L) bufSize = retSize + 0x4000;
+    } while (st == (LONG)0x80000005L);
+
+    DWORD64 result = 0;
+    if (st == 0) {
+        struct HEntry {
+            PVOID    Object;
+            ULONG_PTR UniqueProcessId;
+            ULONG_PTR HandleValue;
+            ULONG    GrantedAccess;
+            USHORT   CreatorBackTraceIndex;
+            USHORT   ObjectTypeIndex;
+            ULONG    HandleAttributes;
+            ULONG    Reserved;
+        };
+        struct HHeader {
+            ULONG_PTR NumberOfHandles;
+            ULONG_PTR Reserved;
+            HEntry    Handles[1];
+        };
+        auto* hdr  = (HHeader*)buf.data();
+        DWORD myPid = GetCurrentProcessId();
+        ULONG_PTR hval = (ULONG_PTR)(ULONG_PTR)hProc;
+        for (ULONG_PTR i = 0; i < hdr->NumberOfHandles; i++) {
+            auto& e = hdr->Handles[i];
+            if ((DWORD)e.UniqueProcessId == myPid && e.HandleValue == hval) {
+                result = (DWORD64)e.Object;
+                break;
+            }
+        }
+    }
+
+    CloseHandle(hProc);
+    return result;
+}
+
 DWORD64 FindEPROCESS(DWORD pid) {
     DWORD64 sysProc = g_drv->Rd64(KernelExport("PsInitialSystemProcess"));
     if (!g_drv->IsKernelVA(sysProc)) return 0;
@@ -194,7 +250,10 @@ DWORD64 FindEPROCESS(DWORD pid) {
         cur = flink - EP_ActiveProcessLinks;
         guard++;
     } while (cur != sysProc && guard < 2048);
-    return 0;
+
+    // DKOM-hidden process: ActiveProcessLinks walk missed it.
+    // Fall back to NtQSI: open a handle and extract Object pointer directly.
+    return FindEPROCESS_NtQsi(pid);
 }
 
 // _PS_PROTECTION: low 3 bits = Type, high 4 bits = Signer

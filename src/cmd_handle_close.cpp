@@ -58,6 +58,7 @@ static void WalkHandleTable(DWORD64 ht,
             DWORD64 e   = base + (DWORD64)idx * HTE_Size;
             DWORD64 obj = g_drv->Rd64(e);
             if (!obj) continue;
+            if (!(obj & 1)) continue;  // bit 0 = valid/lock bit; 0 = free-list entry
             DWORD64 acc = g_drv->Rd64(e + 8);
             if (!cb(e, idx, obj, acc, ctx)) return;
         }
@@ -72,6 +73,7 @@ static void WalkHandleTable(DWORD64 ht,
                 DWORD64 e   = sub + (DWORD64)inner * HTE_Size;
                 DWORD64 obj = g_drv->Rd64(e);
                 if (!obj) continue;
+                if (!(obj & 1)) continue;  // bit 0 = valid/lock bit; 0 = free-list entry
                 DWORD64 acc = g_drv->Rd64(e + 8);
                 if (!cb(e, idx, obj, acc, ctx)) return;
             }
@@ -90,6 +92,7 @@ static void WalkHandleTable(DWORD64 ht,
                     DWORD64 e   = l1 + (DWORD64)inner * HTE_Size;
                     DWORD64 obj = g_drv->Rd64(e);
                     if (!obj) continue;
+                    if (!(obj & 1)) continue;  // bit 0 = valid/lock bit; 0 = free-list entry
                     DWORD64 acc = g_drv->Rd64(e + 8);
                     if (!cb(e, idx, obj, acc, ctx)) return;
                 }
