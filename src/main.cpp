@@ -748,11 +748,23 @@ int main(int argc, char* argv[]) {
         if (spinMs == 0) {
             CmdHandleScan(scanPid, accessMask, targetPid, doClose);
         } else {
-            printf("[*] Spin mode: interval=%ums  Ctrl+C to stop.\n", spinMs);
+            // Spin mode: resolve System EPROCESS + HandleTable once, then loop.
+            // Suppresses per-entry output; only prints when handles are closed.
+            DWORD64 sysEP = KUtil::FindEPROCESS(scanPid);
+            if (!sysEP) { printf("[!] EPROCESS for PID %u not found.\n", scanPid); g_drv->Close(); return 1; }
+            DWORD64 cachedHT = g_drv->Rd64(sysEP + KUtil::EP_HandleTable);
+            if (!cachedHT) { printf("[!] HandleTable ptr is null.\n"); g_drv->Close(); return 1; }
+            printf("[*] Spin mode: interval=%ums  HT=0x%llX  target-pid=%u  Ctrl+C to stop.\n",
+                   spinMs, cachedHT, targetPid);
             DWORD round = 0;
+            DWORD totalClosed = 0;
             while (true) {
                 round++;
-                CmdHandleScan(scanPid, accessMask, targetPid, doClose);
+                int closed = CmdHandleScan(scanPid, accessMask, targetPid, doClose, /*quiet=*/true, cachedHT);
+                if (closed > 0) {
+                    totalClosed += closed;
+                    printf("[spin #%u] closed %d handle(s)  total=%u\n", round, closed, totalClosed);
+                }
                 Sleep(spinMs);
             }
         }

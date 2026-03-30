@@ -214,66 +214,74 @@ void CmdHandleClose(DWORD pid, DWORD64 handleVal) {
 //
 // Safe usage: always pair --close with --target-pid to avoid closing
 // legitimate System handles to csrss/lsass/etc.
-void CmdHandleScan(DWORD pid, DWORD64 accessMask, DWORD targetPid, bool doClose) {
+//
+// quiet=true: suppress per-entry output; only print when handles are closed.
+//             Used by --spin mode to avoid printf overhead in tight loops.
+// cachedHT:   if non-zero, skip FindEPROCESS + Rd64(HandleTable) — caller
+//             resolved these once and passes them in for speed.
+// Returns number of handles closed (or found if !doClose).
+int CmdHandleScan(DWORD pid, DWORD64 accessMask, DWORD targetPid, bool doClose,
+                  bool quiet, DWORD64 cachedHT) {
     if (!accessMask) accessMask = 0x001FFFFF;  // PROCESS_ALL_ACCESS
 
-    DWORD64 ep = KUtil::FindEPROCESS(pid);
-    if (!ep) { printf("%s[!]%s EPROCESS for PID %u not found.\n", A_RED, A_RESET, pid); return; }
-    printf("%s[*]%s PID %-6u  EPROCESS=0x%llX\n", A_CYAN, A_RESET, pid, ep);
+    DWORD64 ht = cachedHT;
+    if (!ht) {
+        DWORD64 ep = KUtil::FindEPROCESS(pid);
+        if (!ep) {
+            if (!quiet) printf("%s[!]%s EPROCESS for PID %u not found.\n", A_RED, A_RESET, pid);
+            return 0;
+        }
+        if (!quiet) printf("%s[*]%s PID %-6u  EPROCESS=0x%llX\n", A_CYAN, A_RESET, pid, ep);
+        ht = g_drv->Rd64(ep + KUtil::EP_HandleTable);
+        if (!ht) { if (!quiet) printf("%s[!]%s HandleTable ptr is null.\n", A_RED, A_RESET); return 0; }
+    }
 
     // Optional: resolve target PID's OBJECT_HEADER for precise filtering
     DWORD64 targetObjHdr = 0;
-    bool    dkomFallback  = false;   // true = EPROCESS hidden, match by reading UniqueProcessId
+    bool    dkomFallback  = false;
     if (targetPid) {
         DWORD64 targetEP = KUtil::FindEPROCESS(targetPid);
         if (!targetEP) {
-            // DKOM-hidden: kshutdown64 removed VBox from ActiveProcessLinks and
-            // ObRegisterCallbacks blocks OpenProcess — fall back to reading
-            // UniqueProcessId directly from each candidate EPROCESS in the walk.
-            printf("%s[!]%s --target-pid %u: EPROCESS hidden (DKOM+ObCb), "
+            if (!quiet) printf("%s[!]%s --target-pid %u: EPROCESS hidden (DKOM+ObCb), "
                    "switching to PID-read fallback.\n", A_YELLOW, A_RESET, targetPid);
             dkomFallback = true;
         } else {
-            targetObjHdr = targetEP - 0x30;  // OBJECT_HEADER is 0x30 bytes before body
-            printf("%s[*]%s target PID %-6u  EPROCESS=0x%llX  OBJECT_HEADER=0x%llX\n",
+            targetObjHdr = targetEP - 0x30;
+            if (!quiet) printf("%s[*]%s target PID %-6u  EPROCESS=0x%llX  OBJECT_HEADER=0x%llX\n",
                    A_CYAN, A_RESET, targetPid, targetEP, targetObjHdr);
         }
     }
 
-    DWORD64 ht = g_drv->Rd64(ep + KUtil::EP_HandleTable);
-    if (!ht) { printf("%s[!]%s HandleTable ptr is null.\n", A_RED, A_RESET); return; }
-
-    DWORD64 tableCode = g_drv->Rd64(ht + HT_TableCode);
-    printf("%s[*]%s HandleTable=0x%llX  TableCode=0x%llX (level=%llu)  "
-           "access=0x%llX%s%s\n",
-           A_CYAN, A_RESET, ht, tableCode, (unsigned long long)(tableCode & 3),
-           accessMask,
-           targetPid ? "  [--target-pid filtered]" : "  [all processes]",
-           doClose   ? "  [--close]" : "");
+    if (!quiet) {
+        DWORD64 tableCode = g_drv->Rd64(ht + HT_TableCode);
+        printf("%s[*]%s HandleTable=0x%llX  TableCode=0x%llX (level=%llu)  "
+               "access=0x%llX%s%s\n",
+               A_CYAN, A_RESET, ht, tableCode, (unsigned long long)(tableCode & 3),
+               accessMask,
+               targetPid ? "  [--target-pid filtered]" : "  [all processes]",
+               doClose   ? "  [--close]" : "");
+    }
 
     struct ScanCtx {
         DWORD64 mask;
-        DWORD64 targetObjHdr;  // 0 = no filter (or dkomFallback mode)
-        DWORD   targetPid;     // used in dkomFallback mode
+        DWORD64 targetObjHdr;
+        DWORD   targetPid;
         bool    dkomFallback;
         bool    doClose;
+        bool    quiet;
         int     found;
         int     closed;
-    } ctx = { accessMask, targetObjHdr, targetPid, dkomFallback, doClose, 0, 0 };
+    } ctx = { accessMask, targetObjHdr, targetPid, dkomFallback, doClose, quiet, 0, 0 };
 
     WalkHandleTable(ht, [](DWORD64 entryVA, DWORD idx, DWORD64 obj, DWORD64 acc, void* pctx) -> bool {
         auto* c = (ScanCtx*)pctx;
 
-        // Access mask filter
         if ((acc & c->mask) != c->mask) return true;
 
-        // Target-PID filter
-        // Win10 19045 encoding: OBJECT_HEADER = (raw >> 16) | 0xFFFF000000000000
         DWORD64 decoded = (obj >> 16) | 0xFFFF000000000000ULL;
         if (c->targetObjHdr) {
             if (decoded != c->targetObjHdr) return true;
         } else if (c->dkomFallback) {
-            // EPROCESS body starts 0x30 bytes after OBJECT_HEADER
             DWORD64 candidateEP  = decoded + 0x30;
             DWORD   candidatePid = (DWORD)g_drv->Rd64(candidateEP + KUtil::EP_UniqueProcessId);
             if (candidatePid != c->targetPid) return true;
@@ -281,15 +289,17 @@ void CmdHandleScan(DWORD pid, DWORD64 accessMask, DWORD targetPid, bool doClose)
 
         DWORD hval = idx * 4;
         c->found++;
-        printf("  %s[+]%s h=0x%08X  acc=0x%08llX  obj=0x%llX\n",
-               A_GREEN, A_RESET, hval, acc, obj);
+        if (!c->quiet)
+            printf("  %s[+]%s h=0x%08X  acc=0x%08llX  obj=0x%llX\n",
+                   A_GREEN, A_RESET, hval, acc, obj);
 
         if (c->doClose) {
             g_drv->Wr64(entryVA,     0);
             g_drv->Wr64(entryVA + 8, 0);
             DWORD64 verify = g_drv->Rd64(entryVA);
             if (verify == 0) {
-                printf("  %s[x]%s h=0x%08X zeroed.\n", A_GREEN, A_RESET, hval);
+                if (!c->quiet)
+                    printf("  %s[x]%s h=0x%08X zeroed.\n", A_GREEN, A_RESET, hval);
                 c->closed++;
             } else {
                 printf("  %s[!]%s h=0x%08X zero did not stick (0x%llX).\n",
@@ -299,9 +309,11 @@ void CmdHandleScan(DWORD pid, DWORD64 accessMask, DWORD targetPid, bool doClose)
         return true;
     }, &ctx);
 
-    printf("\n%s[*]%s Scan complete — %d match(es) found",
-           A_CYAN, A_RESET, ctx.found);
-    if (doClose)
-        printf(", %d closed", ctx.closed);
-    printf(".\n");
+    if (!quiet) {
+        printf("\n%s[*]%s Scan complete — %d match(es) found",
+               A_CYAN, A_RESET, ctx.found);
+        if (doClose) printf(", %d closed", ctx.closed);
+        printf(".\n");
+    }
+    return doClose ? ctx.closed : ctx.found;
 }
