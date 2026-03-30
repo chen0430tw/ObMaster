@@ -719,17 +719,19 @@ int main(int argc, char* argv[]) {
     else if (_stricmp(cmd, "handle-scan") == 0) {
         const char* pidStr = nextArg(0);
         if (!pidStr) {
-            printf("[!] Usage: /handle-scan <pid> [--access <mask>] [--target-pid <pid>] [--close]\n");
+            printf("[!] Usage: /handle-scan <pid> [--access <mask>] [--target-pid <pid>] [--close] [--spin <ms>]\n");
             printf("    Walk <pid>'s kernel HANDLE_TABLE; list entries matching access mask.\n");
             printf("    --access <mask>    : filter by GrantedAccess (default: 0x1fffff)\n");
             printf("    --target-pid <pid> : only show handles pointing to this PID's EPROCESS\n");
             printf("    --close            : zero each matching entry in-place\n");
+            printf("    --spin <ms>        : loop continuously every <ms> ms (default 10); Ctrl+C to stop\n");
             g_drv->Close(); return 1;
         }
         DWORD   scanPid    = (DWORD)strtoul(pidStr, nullptr, 10);
         DWORD64 accessMask = 0;
         DWORD   targetPid  = 0;
         bool    doClose    = false;
+        DWORD   spinMs     = 0;   // 0 = single shot; >0 = loop every N ms
         for (int i = cmdIdx + 1; i < argc; i++) {
             if (_stricmp(argv[i], "--close") == 0 || _stricmp(argv[i], "-close") == 0)
                 doClose = true;
@@ -737,9 +739,23 @@ int main(int argc, char* argv[]) {
                 accessMask = strtoull(argv[++i], nullptr, 16);
             else if ((_stricmp(argv[i], "--target-pid") == 0 || _stricmp(argv[i], "-target-pid") == 0) && i + 1 < argc)
                 targetPid = (DWORD)strtoul(argv[++i], nullptr, 10);
+            else if ((_stricmp(argv[i], "--spin") == 0 || _stricmp(argv[i], "-spin") == 0) && i + 1 < argc) {
+                int v = atoi(argv[++i]);
+                spinMs = v > 0 ? (DWORD)v : 10;
+            }
         }
         KUtil::BuildDriverCache();
-        CmdHandleScan(scanPid, accessMask, targetPid, doClose);
+        if (spinMs == 0) {
+            CmdHandleScan(scanPid, accessMask, targetPid, doClose);
+        } else {
+            printf("[*] Spin mode: interval=%ums  Ctrl+C to stop.\n", spinMs);
+            DWORD round = 0;
+            while (true) {
+                round++;
+                CmdHandleScan(scanPid, accessMask, targetPid, doClose);
+                Sleep(spinMs);
+            }
+        }
     }
     else if (_stricmp(cmd, "drv-zombie") == 0) {
         const char* vaStr = nextArg(0);
