@@ -1353,11 +1353,11 @@ supR3HardNtChildWaitFor[1]: Quitting: ExitCode=0xc0000409
 1. **3 个 PROCESS_ALL_ACCESS (0x1FFFFF) 句柄，全程持续 ~4.38 秒**（与 VBox exit 时间完全吻合）
 2. 这些句柄对 `NtQuerySystemInformation` **可见** — 不是 `OBJ_KERNEL_HANDLE`
    （与 ksafecenter 早期行为不同：那批是 OBJ_KERNEL_HANDLE，对 NtQSI 不可见）
-3. ksafecenter zombie kernel threads 最可能的行为模式：
-   - VBox 创建时开句柄（NtQSI 可见说明走的是用户态表）
-   - 等待 ~4 秒
-   - 调用 `ZwTerminateProcess(handle, STATUS_STACK_BUFFER_OVERRUN)` 终止 VBox
-   - VBox 以 `0xC0000409` 退出，伪装成"正常崩溃"
+3. **【后来逆向证伪】** 这些句柄实际上来自 **kshutdown64.sys** 的 APC 注入机制，
+   而非 ksafecenter zombie threads（见"阶段 5：kshutdown64 逆向分析"）：
+   - kshutdown64 的 CreateProcess 回调 `ZwOpenProcess(DesiredAccess=0x10000000)` 开句柄
+   - NtQSI 可见正是因为 ZwOpenProcess 走用户态 handle table
+   - 真正杀手是注入的 `kshut64.dll`，通过 `TerminateProcess(self, 0xC0000409)` 终止 VBox
 
 ---
 
@@ -1469,8 +1469,8 @@ FindEPROCESS(pid):
 - ✅ FindEPROCESS DKOM bypass 修复
 
 **仍然阻塞：**
-- ❌ VBox 在 4135ms 时被 ksafecenter zombie kernel threads 以 `0xC0000409` 强制终止
-- ❌ ksafecenter zombie 两个 DeviceObjects 阻止完全卸载，RefCount 清零不粘
+- ❌ VBox 在 4135ms 时被 **kshutdown64.sys** 注入的 `kshut64.dll` 以 `0xC0000409` 强制终止（非 ksafecenter）
+- ❌ ksafecenter 两个 DeviceObjects 阻止完全卸载，RefCount 清零不粘（次要问题）
 
 **下一步（服务器）：**
 
@@ -1498,8 +1498,8 @@ sudo ./ObMaster.exe /quiet /handle-scan 4 --target-pid <vboxpid> --close
 | L1 | ObCallback PreOp（ObRegisterCallbacks）| 剥夺外部对受保护进程的权限 | ✅ `/disable` |
 | L2 | CreateProcess Notify Routine (+0x6fac) | 从内核打开 OBJ_KERNEL_HANDLE → evil handle | ✅ `/ndisable` |
 | L3 | DKOM（ActiveProcessLinks 摘链）| FindEPROCESS 失败，handle-scan 无法过滤 VBox | ✅ NtQSI fallback 修复 |
-| L4 | Zombie kernel threads（System 进程 handles）| ~4秒后 ZwTerminateProcess(VBox, 0xC0000409) | 🔄 **下一步：handle-scan --close** |
-| L5 | DeviceObject RefCount 持续恢复 | zombie driver 无法彻底卸载 | 🔄 根因未定位 |
+| L4 | **kshutdown64.sys** APC 注入 kshut64.dll | ~4秒后 TerminateProcess(VBox, 0xC0000409) | 🔄 **隐藏 kshut64.dll 文件** |
+| L5 | DeviceObject RefCount 持续恢复（ksafecenter） | zombie driver 无法彻底卸载 | 🔄 根因未定位（次要） |
 
 #### HANDLE_TABLE_ENTRY 有效性判定
 
@@ -1524,4 +1524,195 @@ SystemExtendedHandleInformation (class 64):
 原理：NtQSI 不走 EPROCESS 链表，走全局 handle table；
       DKOM 藏不住 handle table 里的条目。
 ```
+
+---
+
+## 阶段 5：kshutdown64.sys + kshut64.dll 完整逆向分析（2026-03-30）
+
+### 背景：ksafecenter 无罪，真凶另有其人
+
+静态逆向 `ksafecenter64.sys` 证实其 **没有** `ZwTerminateProcess`、`PsCreateSystemThread`，
+不可能主动杀进程。安装包中另一个驱动 `kshutdown64.sys` 导入了：
+- `PsSetCreateProcessNotifyRoutine`
+- `KeInitializeApc` / `KeInsertQueueApc`
+- `ZwOpenProcess` / `ZwAllocateVirtualMemory`
+- `MmGetSystemRoutineAddress`
+
+这是典型的**内核 APC 注入**驱动特征。
+
+---
+
+### kshutdown64.sys 攻击链总览
+
+```
+kshutdown64.sys 加载（DriverEntry +0x3388）
+│
+├─ ZwAllocateVirtualMemory(handle=-1, size=0x260, PAGE_EXECUTE_READWRITE)
+│    └─ payload+0x90 = UNICODE_STRING L"kshut64.dll"（64位）/ L"kshut.dll"（32位）
+│
+├─ PsSetCreateProcessNotifyRoutine(callback=+0x1D3C)
+│
+└─ [每当有进程创建时] CreateProcess 回调（+0x1D3C）
+     │
+     ├─ PsLookupProcessByProcessId → 取 EPROCESS
+     ├─ GetImageFileName(EPROCESS+0x5C) → 进程名
+     ├─ 对比白名单（clsmn.exe / pubwinclient.exe / explorer.exe / ...）
+     │
+     ├─ [在白名单] → 放行，exit
+     │
+     └─ [不在白名单，如 VBoxSVC.exe] ──────────────────────────┐
+                                                               ↓
+                                          ZwOpenProcess(VBox, 0x10000000)
+                                               ↓
+                                          找 VBox 线程 ETHREAD
+                                               ↓
+                                          KeInitializeApc(apc, thread,
+                                            KernelRoutine, NULL,
+                                            NormalRoutine=LdrLoadDll,
+                                            UserMode, arg=payload)
+                                               ↓
+                                          KeInsertQueueApc(apc)
+                                          ↑ 注：通过函数指针表调用
+                                            [call qword ptr [rsi]]
+                                            [call qword ptr [rsi+8]]
+                                            （不走直接 IAT，绕过简单扫描）
+                                               ↓
+                              [VBox 线程返回用户态，APC 触发]
+                                               ↓
+                                     LdrLoadDll("kshut64.dll")
+                                               ↓
+                                    kshut64.dll DllMain 执行
+                                               ↓
+                                SetUnhandledExceptionFilter(NULL)
+                                               ↓
+                                    GetCurrentProcess()
+                                               ↓
+                              TerminateProcess(self, 0xC0000409)
+                                               ↓
+                         VBox 以 STATUS_STACK_BUFFER_OVERRUN 退出
+                         （伪装成 /GS security cookie 失败）
+```
+
+---
+
+### kshutdown64.sys 攻击链（静态逆向确认）
+
+#### 1. DriverEntry（+0x3388）
+
+```
+call +0x1A20   → 初始化（读注册表配置、superadmin 密码等）
+call +0x17EC   → 检查平台版本
+call +0x184C   → 初始化内部数据结构
+call +0x1630   → ZwAllocateVirtualMemory(-1, 0x260 bytes) 分配 APC payload 区
+                  偏移 +0x90 = UNICODE_STRING "kshut64.dll" / "kshut.dll"
+                  偏移 +0x92 = 模块路径（32/64 位按 OS 选择）
+call +0x2AAC   → PsSetCreateProcessNotifyRoutine(callback=+0x1D3C, FALSE)
+call +0x24E8   → PsSetLoadImageNotifyRoutine(...)
+call +0x28F0   → IoCreateDevice(...)
+MmGetSystemRoutineAddress("ZwQueryInformationProcess")  → 动态解析，存入 .data
+IoCreateDevice → 注册 IOCTL 设备
+```
+
+#### 2. CreateProcess 回调（+0x1D3C）
+
+```c
+// 签名: VOID NotifyRoutine(PEPROCESS Process, HANDLE Pid, PPS_CREATE_NOTIFY_INFO Info)
+if (Info == NULL) goto exit;           // 进程退出通知，忽略
+PsLookupProcessByProcessId(Pid, &proc)
+GetImageFileName(proc)                 // EPROCESS+0x5C = ImageFileName
+// 遍历白名单（.data 中的 Unicode 字符串列表）：
+//   clsmn.exe / pubwinclient.exe / rsclient.exe /
+//   explorer.exe / winlogon.exe / ...（网吧云客户端进程）
+if (process_in_whitelist) goto exit;   // 保护云客户端进程，放行
+KeWaitForSingleObject(mutex)           // 序列化
+RegisterForApcInjection(Pid)           // 记录目标 PID，排队 APC
+KeReleaseMutex(mutex)
+```
+
+#### 3. APC 注入（+0x1A80 区域）
+
+```c
+ZwOpenProcess(Pid, PROCESS_VM_OPERATION|PROCESS_VM_WRITE)  // DesiredAccess=0x10000000
+// 分配内存已在 DriverEntry 完成，payload 区在 VBox 进程地址空间
+// payload 结构（偏移 +0x90）:
+//   UNICODE_STRING.Length      = 按 kshut64.dll 字符数
+//   UNICODE_STRING.MaxLength   = Length + 2
+//   UNICODE_STRING.Buffer      = 指向 payload+0xA0 的 L"kshut64.dll" 字符串
+KeInitializeApc(apc, thread, OriginalApcEnvironment,
+                KernelRoutine, RundownRoutine, NormalRoutine, UserMode, payload)
+KeInsertQueueApc(apc, arg1=NULL, arg2=NULL, 0)
+// NormalRoutine 在 VBox 线程用户态上下文中执行 LdrLoadDll("kshut64.dll")
+```
+
+注意：`KeInitializeApc` / `KeInsertQueueApc` 通过 **函数指针表** 调用
+（`call qword ptr [rsi]` / `call qword ptr [rsi+8]`，不是直接 IAT），
+绕过简单的 IAT 扫描。
+
+#### 4. kshut64.dll DllMain
+
+```c
+// DLL_PROCESS_ATTACH → 直接 kill VBox
+SetUnhandledExceptionFilter(NULL);     // 关闭崩溃处理器
+UnhandledExceptionFilter(exception);   // 走默认路径
+GetCurrentProcess();
+TerminateProcess(self, 0xC0000409);    // STATUS_STACK_BUFFER_OVERRUN
+```
+
+用 `0xC0000409` 而非 `0x1` 是**刻意伪装**：
+让人以为是 VBox 自身 /GS security cookie 失败，而非被外力终止。
+
+---
+
+### MmGetSystemRoutineAddress 解析目标
+
+| 调用位置 | 解析的函数名 |
+|----------|-------------|
+| +0x33FF  | `ZwQueryInformationProcess` |
+
+用途：查询 VBox 进程的 PEB、ImageFileName 等信息，辅助白名单比对。
+
+---
+
+### 白名单进程（.data Unicode 字符串，网吧云客户端）
+
+```
+clsmn.exe          pubwinclient.exe     rsclient.exe
+explorer.exe       winlogon.exe         ...
+```
+
+VirtualBox 不在白名单 → 必然触发 APC 注入。
+
+---
+
+### 修复方案：隐藏 kshut64.dll
+
+APC 注入的最后一步是在 VBox 进程用户态调用 `LdrLoadDll`，
+如果 `kshut64.dll` 文件不存在（或被重命名），加载失败，VBox 毫发无损。
+
+```cmd
+# 找到 kshut64.dll 实际安装位置
+where /r C:\ kshut64.dll
+
+# 将其重命名（比删除更安全，便于恢复）
+ren C:\path\to\kshut64.dll kshut64.dll.bak
+ren C:\path\to\kshut.dll   kshut.dll.bak
+```
+
+备选方案（不修改文件系统）：
+- ObMaster `/ndisable` 注销 kshutdown64 的 CreateProcess notify routine
+  - 回调 RVA +0x1D3C，在运行时 VA = `ImageBase + 0x1D3C`
+  - 用 `PsSetCreateProcessNotifyRoutine(callback, TRUE)` 从回调数组移除
+
+---
+
+### 各驱动角色总结
+
+| 驱动 | 真实职能 | 对 VBox 的威胁 |
+|------|---------|---------------|
+| ksafecenter64.sys | ObCallback 进程保护 + LoadImage notify | L1/L2/L3（已全部绕过）|
+| **kshutdown64.sys** | **APC 注入 kshut64.dll 杀非白名单进程** | **L4 — 当前阻塞原因** |
+| kcachec64.sys | PsSetCreateProcessNotifyRoutine + 线程创建 | 待分析 |
+| kpowershutdown64.sys | 电源/关机控制（猜测） | 无直接威胁 |
+| kantiarp64.sys | ARP 防火墙 | 无直接威胁 |
+| kdisk64.sys / krestore64.sys / kscsidisk64.sys | 磁盘影子还原 | 无直接威胁 |
 
