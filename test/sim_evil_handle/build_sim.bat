@@ -22,8 +22,14 @@ cl.exe /nologo /O2 /MT /EHsc /std:c++17 /utf-8 ^
     /Fe:"%HERE%SimKsafe.exe" ^
     /link advapi32.lib
 
-if exist "%HERE%SimVBox.exe" if exist "%HERE%SimKsafe.exe" (
-    echo [+] Build OK: SimVBox.exe SimKsafe.exe
+echo [*] Building SimKshutdown.exe...
+cl.exe /nologo /O2 /MT /EHsc /std:c++17 /utf-8 ^
+    "%HERE%SimKshutdown.cpp" ^
+    /Fe:"%HERE%SimKshutdown.exe" ^
+    /link advapi32.lib
+
+if exist "%HERE%SimVBox.exe" if exist "%HERE%SimKsafe.exe" if exist "%HERE%SimKshutdown.exe" (
+    echo [+] Build OK: SimVBox.exe SimKsafe.exe SimKshutdown.exe
 ) else (
     echo [!] Build FAILED
 )

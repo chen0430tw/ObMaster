@@ -30,9 +30,14 @@
 //   +0x008 GrantedAccess   ULONGLONG
 //
 // Handle index = handle_value >> 2
-// Level 0: direct array, entry = TableBase + index * 16
-// Level 1: array of sub-table ptrs (256 entries each)
-// Level 2: two-level indirection
+// Level 0: direct leaf page,  256 entries  (4096 / sizeof(HTE)  = 256)
+// Level 1: 512 ptr slots × 256 entries     (4096 / sizeof(ptr)  = 512 outer, 256 inner) → max 131072
+// Level 2: 128 ptr slots × 512 × 256      (EX_MAXIMUM_HANDLES=16M / 131072 = 128 top)  → max 16M
+//
+// Index decomposition:
+//   Level 1: outer = idx / 256 (0..511),               inner = idx % 256
+//   Level 2: top   = idx / (512*256) (0..127),
+//            mid   = (idx / 256) % 512 (0..511),        inner = idx % 256
 
 static const DWORD HT_NextPool  = 0x000;   // NextHandleNeedingPool  (ULONG)
 static const DWORD HT_TableCode = 0x008;   // TableCode  (ULONGLONG, low 2 bits = level)
@@ -47,7 +52,7 @@ static void WalkHandleTable(DWORD64 ht,
 {
     DWORD   nextPool  = (DWORD)g_drv->Rd64(ht + HT_NextPool); // next unallocated handle value
     DWORD   maxIdx    = nextPool >> 2;
-    if (maxIdx == 0 || maxIdx > 0x20000) maxIdx = 0x4000;     // sanity cap ~64K handles
+    if (maxIdx == 0 || maxIdx > 0x400000) maxIdx = 0x200000;  // sanity cap: 4M slots (Level-2 max ~16M)
 
     DWORD64 tableCode = g_drv->Rd64(ht + HT_TableCode);
     int     level     = (int)(tableCode & 3);
@@ -63,7 +68,7 @@ static void WalkHandleTable(DWORD64 ht,
             if (!cb(e, idx, obj, acc, ctx)) return;
         }
     } else if (level == 1) {
-        for (DWORD outer = 0; outer < 256; outer++) {
+        for (DWORD outer = 0; outer < 512; outer++) {
             DWORD64 sub = g_drv->Rd64(base + outer * 8);
             if (!sub) continue;
             for (DWORD inner = 0; inner < 256; inner++) {
@@ -79,14 +84,14 @@ static void WalkHandleTable(DWORD64 ht,
             }
         }
     } else if (level == 2) {
-        for (DWORD top = 0; top < 256 && top * 256 * 256 < maxIdx; top++) {
+        for (DWORD top = 0; top < 128 && top * 512 * 256 < maxIdx; top++) {
             DWORD64 l2 = g_drv->Rd64(base + top * 8);
             if (!l2) continue;
-            for (DWORD mid = 0; mid < 256; mid++) {
+            for (DWORD mid = 0; mid < 512; mid++) {
                 DWORD64 l1 = g_drv->Rd64(l2 + mid * 8);
                 if (!l1) continue;
                 for (DWORD inner = 0; inner < 256; inner++) {
-                    DWORD idx = top * 256 * 256 + mid * 256 + inner;
+                    DWORD idx = top * 512 * 256 + mid * 256 + inner;
                     if (idx == 0) continue;
                     if (idx >= maxIdx) return;
                     DWORD64 e   = l1 + (DWORD64)inner * HTE_Size;
@@ -114,9 +119,9 @@ static DWORD64 FindHandleEntry(DWORD64 handleTable, DWORD handleVal) {
         if (!sub) return 0;
         return sub + (DWORD64)(idx % 256) * HTE_Size;
     } else if (level == 2) {
-        DWORD64 l2  = g_drv->Rd64(base + (idx / (256 * 256)) * 8);
+        DWORD64 l2  = g_drv->Rd64(base + (idx / (512 * 256)) * 8);
         if (!l2) return 0;
-        DWORD64 l1  = g_drv->Rd64(l2 + ((idx / 256) % 256) * 8);
+        DWORD64 l1  = g_drv->Rd64(l2 + ((idx / 256) % 512) * 8);
         if (!l1) return 0;
         return l1 + (DWORD64)(idx % 256) * HTE_Size;
     }

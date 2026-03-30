@@ -149,10 +149,14 @@ static int ScanOnce(DWORD myPid, DWORD parentPid) {
 // ── main ─────────────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
-    bool once = false;
+    bool once        = false;
+    int  killTimeout = 0;   // ms; 0 = disabled.  Simulates kshut64.dll kill deadline.
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--once") == 0 || strcmp(argv[i], "-once") == 0)
             once = true;
+        else if (strcmp(argv[i], "--kill-timeout") == 0 && i + 1 < argc)
+            killTimeout = atoi(argv[++i]);
     }
 
     NtQSI = (PFN_NtQSI)GetProcAddress(GetModuleHandleA("ntdll.dll"),
@@ -167,11 +171,15 @@ int main(int argc, char* argv[]) {
 
     printf("=== SimVBox — evil handle detector ===\n");
     printf("    PID: %lu    Parent: %lu\n", myPid, parentPid);
+    if (killTimeout > 0)
+        printf("    Kill timeout: %dms (simulates kshut64.dll APC deadline)\n", killTimeout);
     if (!once) printf("    Ctrl+C to exit\n");
     printf("\n");
     fflush(stdout);
 
-    int pass = 0;
+    DWORD startMs = GetTickCount();
+    int   pass    = 0;
+
     for (;;) {
         pass++;
         printf("[pass %d] Scanning...\n", pass);
@@ -183,6 +191,28 @@ int main(int argc, char* argv[]) {
         } else if (found > 0) {
             printf("\n  VERR_SUP_VP_FOUND_EVIL_HANDLE (-3738) — %d handle(s)\n", found);
         }
+
+        // Deadline check: if evil handles still present when timeout fires,
+        // simulate being killed by kshut64.dll (TerminateProcess 0xC0000409).
+        if (killTimeout > 0) {
+            DWORD elapsed = GetTickCount() - startMs;
+            if ((int)elapsed >= killTimeout) {
+                if (found > 0) {
+                    printf("\n  [DEAD] kshut64.dll deadline reached (%dms) — "
+                           "evil handles still present.\n", killTimeout);
+                    printf("  [DEAD] Simulating TerminateProcess(self, 0xC0000409).\n");
+                    fflush(stdout);
+                    ExitProcess(0xC0000409);
+                } else {
+                    printf("  [SAFE] Deadline reached but no evil handles — "
+                           "ObMaster won in time!\n");
+                    fflush(stdout);
+                    break;
+                }
+            }
+            printf("  [timer] %lums / %dms\n", (unsigned long)elapsed, killTimeout);
+        }
+
         printf("\n");
         fflush(stdout);
 
