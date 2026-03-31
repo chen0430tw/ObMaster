@@ -185,6 +185,8 @@ Requires Visual Studio 2022 BuildTools + Windows SDK 10.0.26100.0. `do_build2.ba
 
 This is not needed when running from `cmd.exe` or when using `--quiet` to suppress the banner.
 
+When invoking via `sudo ObMaster.exe` from **Claude Code's built-in bash tool**, box-drawing characters will appear garbled regardless of encoding settings — this is a rendering issue in Claude Code's output pipeline, not an ObMaster or sudo bug. The same command displays correctly in PowerShell, Windows Terminal, Cygwin bash, and Git Bash.
+
 ## Tests
 
 ```bat
