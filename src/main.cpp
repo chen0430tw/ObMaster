@@ -34,7 +34,7 @@ static void Banner() {
 
 static void Usage(const char* prog) {
     printf(
-        "Usage: %s [/json] [/quiet] <command> [args]\n\n"
+        "Usage: %s [/json|?json] [/quiet] <command> [args]\n\n"
         "  Global flags (can appear anywhere, /flag -flag --flag all accepted):\n"
         "    /json  --json         Machine-readable JSON output (for agents/scripts)\n"
         "    /quiet --quiet        Suppress banner\n"
@@ -313,9 +313,9 @@ int main(int argc, char* argv[]) {
     setvbuf(stdout, nullptr, _IONBF, 0);  // unbuffered stdout (needed for /watchfix piped output)
 
     // ── Pre-scan global flags (can appear anywhere in argv) ───────────────────
-    // Accepts /flag  -flag  --flag  (--flag is not mangled by MSYS/Git Bash)
+    // Accepts /flag  -flag  --flag  ?flag  (--flag is not mangled by MSYS/Git Bash)
     auto stripDashes = [](const char* a) -> const char* {
-        if (a[0]=='/' || a[0]=='-') { a++; if (a[0]=='-') a++; }
+        if (a[0]=='/' || a[0]=='-' || a[0]=='?') { a++; if (a[0]=='-') a++; }
         // MSYS/Git Bash expands /notify -> /C:/Program Files/Git/notify
         // After stripping the leading slash we get a path; take the last component.
         const char* slash = strrchr(a, '/');

@@ -83,9 +83,21 @@
 #define FLTP_REGFILTERS_FLINK 0x0B0  // RegisteredFilters.rList.Flink offset in FLTP_FRAME
 
 // FLT_FILTER
+#define FLTF_FLAGS_OFF        0x058
+#define FLTF_DRIVEROBJ_OFF    0x060
 #define FLTF_NAME_OFF         0x038
 #define FLTF_INSTLIST_FLINK   0x0D0  // InstanceList.rList.Flink
+#define FLTF_FILTERUNLOAD     0x100
+#define FLTF_INSTANCESETUP    0x108
 #define FLTF_QUERYTEARDOWN    0x110
+#define FLTF_TEARDOWNSTART    0x118
+#define FLTF_TEARDOWNCOMPLETE 0x120
+
+// FLT_FILTER.Flags (stored in DWORD64 slot at +0x058)
+// Low DWORD = FLT_REGISTRATION.Flags as copied at registration time
+#define FLTFL_DO_NOT_SUPPORT_SERVICE_STOP  0x00000001
+#define FLTFL_SUPPORT_NPFS_MSFS            0x00000002
+#define FLTFL_SUPPORT_DAX_VOLUME           0x00000004
 
 // FLT_INSTANCE
 #define FLTI_VOLUME_OFF       0x038
@@ -281,6 +293,43 @@ static void WalkFilters(DWORD64 frameListHeadKVA,
     }
 }
 
+// Print one callback slot: address + driver attribution (text mode).
+static void PrintCbSlot(const char* label, DWORD64 cbAddr) {
+    if (!cbAddr) {
+        printf("      %-26s (null)\n", label);
+        return;
+    }
+    const wchar_t* owner = L"?"; DWORD64 off = 0;
+    KUtil::FindDriverByAddr(cbAddr, &owner, &off);
+    printf("      %-26s %p  (%ls +0x%llx)\n",
+           label, (void*)cbAddr, owner, (unsigned long long)off);
+}
+
+// Decode FLT_FILTER flags to a short tag string.
+static std::string FltFlagsStr(DWORD64 flags) {
+    std::string s;
+    if (flags & FLTFL_DO_NOT_SUPPORT_SERVICE_STOP) s += "NO_STOP ";
+    if (flags & FLTFL_SUPPORT_NPFS_MSFS)           s += "NPFS ";
+    if (flags & FLTFL_SUPPORT_DAX_VOLUME)          s += "DAX ";
+    if (s.empty()) s = "-";
+    else s.pop_back();
+    return s;
+}
+
+// JSON helper: resolve addr to "0xADDR (driver+off)" string
+static std::string JCb(DWORD64 addr) {
+    if (!addr) return "\"null\"";
+    const wchar_t* owner = L"?"; DWORD64 off = 0;
+    KUtil::FindDriverByAddr(addr, &owner, &off);
+    char buf[256];
+    // narrow owner
+    char narrow[128]{};
+    WideCharToMultiByte(CP_UTF8, 0, owner, -1, narrow, sizeof(narrow)-1, nullptr, nullptr);
+    snprintf(buf, sizeof(buf), "\"0x%llx (%s+0x%llx)\"",
+             (unsigned long long)addr, narrow, (unsigned long long)off);
+    return buf;
+}
+
 // Walk FLT_INSTANCE entries for a filter.  cb(instVA) → false to stop.
 static void WalkInstances(DWORD64 filterVA, std::function<bool(DWORD64)> cb) {
     DWORD64 headVA = filterVA + FLTF_INSTLIST_FLINK;
@@ -338,52 +387,99 @@ void CmdFlt(const char* volumeArg) {
     if (!FltSetup(&hFlt, &listHead)) return;
     FreeLibrary(hFlt);
 
-    bool   jsonFirst = true;
-    int    total     = 0;
+    bool jsonFirst = true;
+    int  totalFilters = 0, totalInst = 0;
 
     if (g_jsonMode)
-        printf("{\"command\":\"flt\",\"instances\":[\n");
-    else {
-        printf("%-24s  %-14s  %s\n", "Filter", "Altitude", "Volume (NT device)");
-        printf("%s\n", std::string(100, '-').c_str());
-    }
+        printf("{\"command\":\"flt\",\"filters\":[\n");
 
     WalkFilters(listHead, [&](DWORD64 filterVA, const std::string& fname) -> bool {
+        // ── per-filter data ────────────────────────────────────────────────
+        DWORD64 flags       = g_drv->Rd64(filterVA + FLTF_FLAGS_OFF);
+        DWORD64 cbUnload    = g_drv->Rd64(filterVA + FLTF_FILTERUNLOAD);
+        DWORD64 cbSetup     = g_drv->Rd64(filterVA + FLTF_INSTANCESETUP);
+        DWORD64 cbTeardown  = g_drv->Rd64(filterVA + FLTF_QUERYTEARDOWN);
+        DWORD64 cbTdStart   = g_drv->Rd64(filterVA + FLTF_TEARDOWNSTART);
+        DWORD64 cbTdDone    = g_drv->Rd64(filterVA + FLTF_TEARDOWNCOMPLETE);
+
+        // collect matching instances first so we know count
+        struct InstRec { std::string alt, vol; DWORD64 instVA; };
+        std::vector<InstRec> insts;
         WalkInstances(filterVA, [&](DWORD64 instVA) -> bool {
-            DWORD64 volVA   = g_drv->Rd64(instVA + FLTI_VOLUME_OFF);
+            DWORD64 volVA = g_drv->Rd64(instVA + FLTI_VOLUME_OFF);
             std::string volName;
             if (volVA && g_drv->IsKernelVA(volVA))
                 volName = ReadKStr(volVA + FLTV_CDODEVNAME_OFF);
-
-            // Volume filter: match NT device path prefix
             if (!filterNtPath.empty() &&
                 _strnicmp(volName.c_str(), filterNtPath.c_str(), filterNtPath.size()) != 0)
-                return true; // skip this instance
-
-            std::string alt = ReadKStr(instVA + FLTI_ALTITUDE_OFF);
-            total++;
-
-            if (g_jsonMode) {
-                if (!jsonFirst) printf(",\n");
-                jsonFirst = false;
-                printf(" {\"filter\":%s,\"altitude\":%s,\"volume\":%s"
-                       ",\"filter_va\":%s,\"inst_va\":%s}",
-                       JEscape(fname.c_str()).c_str(), JEscape(alt.c_str()).c_str(),
-                       JEscape(volName.c_str()).c_str(),
-                       JAddr(filterVA).c_str(), JAddr(instVA).c_str());
-            } else {
-                printf("%-24s  %-14s  %s\n",
-                       fname.c_str(), alt.c_str(), volName.c_str());
-            }
+                return true;
+            insts.push_back({ ReadKStr(instVA + FLTI_ALTITUDE_OFF), volName, instVA });
             return true;
         });
+
+        if (insts.empty() && !filterNtPath.empty()) return true; // filtered out
+
+        totalFilters++;
+        totalInst += (int)insts.size();
+
+        if (g_jsonMode) {
+            if (!jsonFirst) printf(",\n");
+            jsonFirst = false;
+            printf(" {\"filter\":%s,\"filter_va\":%s,\"flags\":\"0x%llx\""
+                   ",\"cb_filterunload\":%s"
+                   ",\"cb_instancesetup\":%s"
+                   ",\"cb_queryteardown\":%s"
+                   ",\"cb_teardownstart\":%s"
+                   ",\"cb_teardowncomplete\":%s"
+                   ",\"instances\":[\n",
+                   JEscape(fname.c_str()).c_str(),
+                   JAddr(filterVA).c_str(),
+                   (unsigned long long)flags,
+                   JCb(cbUnload).c_str(),
+                   JCb(cbSetup).c_str(),
+                   JCb(cbTeardown).c_str(),
+                   JCb(cbTdStart).c_str(),
+                   JCb(cbTdDone).c_str());
+            bool first = true;
+            for (auto& r : insts) {
+                if (!first) printf(",\n");
+                first = false;
+                printf("   {\"altitude\":%s,\"volume\":%s,\"inst_va\":%s}",
+                       JEscape(r.alt.c_str()).c_str(),
+                       JEscape(r.vol.c_str()).c_str(),
+                       JAddr(r.instVA).c_str());
+            }
+            printf("\n  ]}");
+        } else {
+            // ── text: filter header ────────────────────────────────────────
+            printf("\n%s[%s]%s  va=%p  flags=0x%llx (%s)  instances=%d\n",
+                   A_CYAN, fname.c_str(), A_RESET,
+                   (void*)filterVA,
+                   (unsigned long long)flags, FltFlagsStr(flags).c_str(),
+                   (int)insts.size());
+            // callbacks
+            printf("  Callbacks:\n");
+            PrintCbSlot("FilterUnload",            cbUnload);
+            PrintCbSlot("InstanceSetup",           cbSetup);
+            PrintCbSlot("InstanceQueryTeardown",   cbTeardown);
+            PrintCbSlot("InstanceTeardownStart",   cbTdStart);
+            PrintCbSlot("InstanceTeardownComplete",cbTdDone);
+            // instances
+            if (!insts.empty()) {
+                printf("  Instances:\n");
+                for (auto& r : insts)
+                    printf("    %-14s  %s\n", r.alt.c_str(), r.vol.c_str());
+            }
+        }
         return true;
     });
 
     if (g_jsonMode)
-        printf("\n],\"total\":%d}\n", total);
+        printf("\n],\"total_filters\":%d,\"total_instances\":%d}\n",
+               totalFilters, totalInst);
     else
-        printf("\n%s[*]%s %d minifilter instance(s)\n", A_CYAN, A_RESET, total);
+        printf("\n%s[*]%s %d filter(s), %d instance(s)\n",
+               A_CYAN, A_RESET, totalFilters, totalInst);
 }
 
 // ── /flt-detach <filter> <drive> ─────────────────────────────────────────────
