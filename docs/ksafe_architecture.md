@@ -411,12 +411,138 @@ PPL 理论上应挡住 `PROCESS_VM_OPERATION`（APC 注入需分配内存）。
 
 ---
 
+## ParadexMonitor 自动化分析 (2026-04-10)
+
+使用 `ppm-engine v0.2.0` 对云更新完整驱动栈做 8 阶段自动化分析。
+分析时间: 全部 11 个组件合计 < 30 秒。
+
+### 驱动栈威胁总览
+
+| 驱动 | 大小 | 分类 | 回调 | Pattern | 威胁 |
+|------|------|------|------|---------|------|
+| **ksafecenter64.sys** | 61K | `protection_minifilter` | ObCallback + CmCallback + LoadImage + minifilter | ob_callback(0.85), cm_callback(0.75) | **高** |
+| **kshutdown64.sys** | 27K | `apc_injector` | ProcessNotify + LoadImage | apc_inject(0.8) | **高** |
+| **kboot64.sys** | 222K | `apc_injector` | CmCallback + ProcessNotify + LoadImage | cm_callback(0.85), apc_inject(0.8) | **高** |
+| **kcachec64.sys** | 61K | `process_monitor` | ProcessNotify | - | **中** |
+| **kscsidisk64.sys** | 131K | `process_monitor` | ProcessNotify + LoadImage | - | **中** |
+| **krestore64.sys** | 53K | `generic_driver` | - | - | 低 |
+| **kantiarp64.sys** | 27K | `generic_driver` | - | - | 低 |
+| **kdisk64.sys** | 26K | `generic_driver` | - | - | 低 |
+| **kpowershutdown64.sys** | 20K | `generic_driver` | - | - | 低 |
+
+**全部 9 个驱动都没有 DriverUnload -- 加载后均无法通过正常手段卸载。**
+
+### 用户态组件
+
+| 组件 | 大小 | 分类 | 关键导入 |
+|------|------|------|---------|
+| **kshut64.dll** | PE64_DLL, 146 imports | 用户态杀手 | 线程劫持全套 (SuspendThread/GetThreadContext/SetThreadContext/ResumeThread/FlushInstructionCache), OpenProcess+TerminateProcess, RegOpenKeyExW+RegQueryValueExW (读黑名单), OpenEventW+WaitForSingleObject (等驱动信号), WS2_32 网络套件 (connect/send/recv), EnumWindowStationsW+EnumDesktopsW (跨桌面枚举) |
+| **kssd.exe** | PE64, packed=True, 735 imports | 游戏磁盘管理器 | 17,164 函数, 32,627 depgraph 节点。标记为加壳。 |
+
+### ksafecenter64.sys 深度分析
+
+**回调注册:**
+```
+sub_74FC -> ObRegisterCallbacks (handler 入口未知, PreOp @ 0x78B8)
+sub_7A08 -> CmRegisterCallbackEx (callback @ 0x7C20)
+sub_69B4 -> PsSetLoadImageNotifyRoutine
+FltRegisterFilter (minifilter)
+```
+
+**ObOpenObjectByPointer 数据流追踪:**
+```
+@ 0x4C10: DesiredAccess(rdx) = 0x200 [QUERY_INFO], r8=0, r9=0
+@ 0x58AF: DesiredAccess(rdx) = 0x200 [QUERY_INFO], r8=0, r9=0
+```
+结论: 两个调用点都只用 0x200, 不产生 PROCESS_ALL_ACCESS (0x1FFFFF) 句柄。
+Evil handle 是 ObOpenObjectByPointer -> ZwClose 之间的瞬态竞态产物。
+
+**CmRegisterCallbackEx 数据流追踪:**
+```
+@ 0x7A47: callback(rcx) = 0x7C20 [rip_relative], context(r9) = 0
+```
+CmCallback @ 0x7C20 只拦截 RegNtPreSetValueKey, 保护 `\SOFTWARE\kSafeCenter`。
+
+**ObOpenObjectByPointer 完整调用链:**
+```
+sub_78B8 (PreOp) -> sub_7600 (IsProtectedPid) -> sub_4BCC -> ObOpenObjectByPointer
+sub_1724 -> sub_4BCC -> ObOpenObjectByPointer
+sub_2764 -> sub_31B4 -> sub_4BCC -> ObOpenObjectByPointer
+sub_27E8 -> sub_31B4 -> sub_4BCC -> ObOpenObjectByPointer
+sub_5860 -> ObOpenObjectByPointer
+```
+
+**PreOp 伪代码 (0x78B8) -- 句柄权限剥夺:**
+```c
+void PreOp(OB_PRE_OPERATION_INFO* info) {
+    if (info->KernelHandle) return;          // 跳过内核句柄
+    if (KeGetCurrentIrql() >= DISPATCH) return; // 跳过高 IRQL
+    pid = PsGetProcessId(info->Object);
+    if (info->Operation != HANDLE_CREATE) return;
+    if (IsProtectedPid(pid) == false) {
+        // 剥夺权限位:
+        DesiredAccess &= 0xFFFFFFFE;  // 去 PROCESS_TERMINATE (0x001)
+        DesiredAccess &= 0xFFFFFFF7;  // 去 PROCESS_VM_OPERATION (0x008)
+        DesiredAccess &= 0xFFFFFFEF;  // 去 PROCESS_VM_READ (0x010)
+        DesiredAccess &= 0xFFFFFFDF;  // 去 PROCESS_VM_WRITE (0x020)
+        BTR DesiredAccess, 11;        // 去 PROCESS_SUSPEND_RESUME (0x800)
+    }
+    return STATUS_SUCCESS;
+}
+```
+
+**IsProtectedPid (0x7600) 逻辑:**
+```
+1. PsLookupProcessByProcessId(pid)
+2. IoGetCurrentProcess() -- 排除自身
+3. 检查进程存活时间 > 50 秒 (0x2FAF080 = 50,000,000 * 100ns)
+4. 检查 PID > 4 (排除 System)
+5. sub_4BCC -> ObOpenObjectByPointer(0x200) -> 读映像名
+6. sub_5860 -> ObOpenObjectByPointer(0x200) -> 读 PEB
+7. 字符串匹配检查
+```
+
+### kboot64.sys 关键发现
+
+kboot64 是整个驱动栈中最危险的组件 (222K, 最大):
+- **cm_callback(0.85)** @ 0x1853F -- 注册表保护
+- **apc_inject(0.8)** -- APC 注入能力
+- **EPROCESS offset 写入** -- DKOM 能力
+- **MmGetSystemRoutineAddress** -- 动态 API 解析
+- 540 函数, 1412 节点, 1840 边, 87 条链
+- 之前文档怀疑 evil handle 可能来自 kboot64, 现在 ppm 确认它具备 CmCallback + APC + DKOM 全套能力
+
+### kshutdown64.sys + kshut64.dll 双路径确认
+
+**内核路径 (kshutdown64.sys):**
+- `apc_inject(0.8)` -- PsSetCreateProcessNotifyRoutine + KeInitializeApc + KeInsertQueueApc + ZwAllocateVirtualMemory
+- ProcessNotify 触发 -> ZwOpenProcess -> ZwAllocateVirtualMemory -> KeInsertQueueApc -> 目标进程执行 ExitProcess
+
+**用户态路径 (kshut64.dll):**
+- 注入 winlogon.exe, 等待 kshutdown64.sys 的 Event 信号
+- 收到信号后: OpenProcess + TerminateProcess (主路径)
+- 备用: SuspendThread -> VirtualAlloc -> SetThreadContext -> ResumeThread (线程劫持)
+- 黑名单来源: RegOpenKeyExW + RegQueryValueExW 读 `HKLM\SYSTEM\CurrentControlSet\shut`
+- 带 WS2_32 网络能力, 可能直接与服务端通信
+
+### 防御优先级 (基于自动化分析)
+
+```
+1. ksafecenter64 -- /disable ObCallback + /ndisable ProcessNotify (盲化传感器)
+2. kshutdown64   -- /ndisable ProcessNotify (断内核APC触发链)
+3. kboot64       -- /force-stop (最危险但非核心攻击链)
+4. kshut64.dll   -- /wluninject (断用户态备用路径)
+5. kcachec64     -- /ndisable ProcessNotify (清除辅助监控)
+```
+
+---
+
 ## 待完成
 
 ### 逆向分析
 - [x] 反汇编 kshut64.dll `GetPrivateProfileStringW` — config.ini 只存 serverip，不含黑名单
 - [x] 确认黑名单来源 — 注册表 `HKLM\SYSTEM\CurrentControlSet` value `shut`（RegQueryValueExW 0x180005CEA，RegOpenKeyExW 0x180005CAA）
-- [ ] 分析 kcachec64.sys（已知有 CreateProcess notify，具体行为未知）
+- [x] 分析 kcachec64.sys -- ppm 确认: process_monitor, ProcessNotify, MmGetSystemRoutineAddress, 无 DriverUnload
 - [ ] 找到 kshutdown64 设备名（IoCreateDevice，名称未明文出现，可能动态构造）
 
 ### 沙盒演习（用户态）
