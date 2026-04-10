@@ -48,6 +48,11 @@ PteInfo ReadPte(DWORD64 va);
 // Overwrite the PTE for 'va' with newPteVal (single Wr64 — atomicity on aligned addr)
 bool WritePte(DWORD64 va, DWORD64 newPteVal);
 
+// Flush TLB for 'va' via MapPhys + WRITE IOCTL + UnmapPhys.
+// Replaces ~PTE_GLOBAL + SwitchToThread() approach.
+// Falls back to SwitchToThread() if MapPhys is unavailable.
+bool FlushTlb(DWORD64 va);
+
 // Check if 'va' is present in the PTE self-map (P bit = 1).
 // Returns false if MmPteBase is unknown, va is 0, or the page is not present.
 // Only reads the PTE entry, never dereferences 'va' itself — safe to call on

@@ -26,7 +26,11 @@ public:
     BYTE    Rd8 (DWORD64 a)           { return (BYTE )(ReadPrim(a, 1) & 0xFF);   }
     WORD    Rd16(DWORD64 a)           { return (WORD )(ReadPrim(a, 2) & 0xFFFF); }
     DWORD   Rd32(DWORD64 a)           { return ReadPrim(a, 4);                   }
-    DWORD64 Rd64(DWORD64 a)           { return ((DWORD64)Rd32(a+4) << 32) | Rd32(a); }
+    DWORD64 Rd64(DWORD64 a)           {
+        // Guard against a+4 wrapping to ~0 (e.g. a=0xFFFFFFFFFFFFFFFF → a+4=3 → BSOD)
+        if (a + 4 < a) return 0;
+        return ((DWORD64)Rd32(a+4) << 32) | Rd32(a);
+    }
 
     void    Wr8 (DWORD64 a, BYTE    v) { WritePrim(a, 1, v);                    }
     void    Wr32(DWORD64 a, DWORD   v) { WritePrim(a, 4, v);                    }

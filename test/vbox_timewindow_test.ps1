@@ -25,18 +25,30 @@ if (-not (Test-Path $VBOXVM)) { Write-Error "VirtualBoxVM not found";       exit
 # Returns number of handles actually zeroed
 # ---------------------------------------------------------------------------
 function Close-KernelHandles([int]$TargetPid) {
-    $args = @('/quiet', '/handle-scan', '4', '--close')
-    if ($TargetPid -gt 0) { $args += @('--target-pid', "$TargetPid") }
-    $out = & $OBM @args 2>&1
-    $found  = ($out | Select-String '\[\+\] h=').Count
-    $closed = ($out | Select-String '\[x\] h=').Count
-    if ($found -gt 0) {
-        Write-Host "      [ObMaster] found=$found closed=$closed" -ForegroundColor Magenta
-        $out | Where-Object { $_ -match '\[.\] h=' } | ForEach-Object {
-            Write-Host "        $_" -ForegroundColor DarkMagenta
-        }
+    $total = 0
+    # 关 System (PID 4) 内核句柄 — ksafecenter 路径（不加 --target-pid，覆盖所有子进程）
+    $out4 = & $OBM '/quiet', '/handle-scan', '4', '--close' 2>&1
+    $found4  = ($out4 | Select-String '\[\+\] h=').Count
+    $closed4 = ($out4 | Select-String '\[x\] h=').Count
+    if ($found4 -gt 0) {
+        Write-Host "      [Sys4] found=$found4 closed=$closed4" -ForegroundColor Magenta
+        $out4 | Where-Object { $_ -match '\[.\] h=' } | ForEach-Object { Write-Host "        $_" -ForegroundColor DarkMagenta }
     }
-    return $closed
+    $total += $closed4
+
+    # 关 winlogon 用户态句柄 — kshut64.dll 路径（同样不加 --target-pid）
+    $wlPid = (Get-Process winlogon -ErrorAction SilentlyContinue | Select-Object -First 1).Id
+    if ($wlPid) {
+        $outWl  = & $OBM '/quiet', '/handle-scan', "$wlPid", '--close' 2>&1
+        $foundWl  = ($outWl | Select-String '\[\+\] h=').Count
+        $closedWl = ($outWl | Select-String '\[x\] h=').Count
+        if ($foundWl -gt 0) {
+            Write-Host "      [Winlogon/$wlPid] found=$foundWl closed=$closedWl" -ForegroundColor Yellow
+            $outWl | Where-Object { $_ -match '\[.\] h=' } | ForEach-Object { Write-Host "        $_" -ForegroundColor DarkYellow }
+        }
+        $total += $closedWl
+    }
+    return $total
 }
 
 # ---------------------------------------------------------------------------

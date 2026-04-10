@@ -155,10 +155,8 @@ void CmdSafePatch(DWORD64 addr, const char* hexStr) {
         DWORD old;
         VirtualProtect(shadowVA, 4096, PAGE_EXECUTE_READ, &old);
 
-        // 7. Brief pause — lets context switches propagate TLB invalidation
-        //    to other CPUs.  Old TLB entries still point to valid original code,
-        //    so no crash risk during this window.
-        Sleep(15);
+        // 7. Flush TLB: MapPhys(shadow PA) + WRITE IOCTL + UnmapPhys.
+        FlushTlb(pageVA);
 
         usedShadow = true;
         printf("  %s[+] Shadow page mapped over kernel code page%s\n", A_GREEN, A_RESET);
@@ -218,7 +216,7 @@ void CmdSafePatchRestore(DWORD64 addr) {
         printf("[*] Restoring original PTE (PA=0x%012llX)...\n",
                rec->orig_pte_val & PTE_PA_MASK);
         WritePte(rec->page_start, rec->orig_pte_val);
-        Sleep(15);
+        FlushTlb(rec->page_start);
         // Re-allow writes to shadow page before freeing
         DWORD old;
         VirtualProtect(rec->shadow_va, 4096, PAGE_EXECUTE_READWRITE, &old);

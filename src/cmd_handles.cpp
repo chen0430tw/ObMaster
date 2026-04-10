@@ -11,9 +11,13 @@
 #include "jutil.h"
 #include "ansi.h"
 
-// ─── /handles [drive] ────────────────────────────────────────────────────────
+// ─── /handles [drive|path] [--close] ─────────────────────────────────────────
 // Enumerate all open file handles system-wide.
-// Optional filter: drive letter (e.g. "E" or "E:") narrows to that volume only.
+// Filter modes:
+//   "E" or "E:"             → all handles on that volume
+//   "C:\path\to\dir"        → handles whose NT path starts with that prefix
+//   "C:\path\to\file.txt"   → handles to that exact file (prefix match)
+// --close: forcibly close every matching handle via DuplicateHandle(CLOSE_SOURCE)
 //
 // Technique:
 //   1. NtQuerySystemInformation(SystemHandleInformation) — full system handle table
@@ -123,7 +127,7 @@ static std::map<std::pair<DWORD,DWORD>, char> BuildVolumeMap() {
 
 // ── Main command ─────────────────────────────────────────────────────────────
 
-void CmdHandles(const char* filter) {
+void CmdHandles(const char* filter, bool doClose) {
     auto* NtQSI = (PFN_NtQSI)GetProcAddress(
         GetModuleHandleA("ntdll.dll"), "NtQuerySystemInformation");
     if (!NtQSI) {
@@ -131,19 +135,55 @@ void CmdHandles(const char* filter) {
         return;
     }
 
-    // Resolve optional volume filter
-    std::string filterPath;
-    char filterDrive = 0;
+    // ── Resolve filter ────────────────────────────────────────────────────────
+    // Mode A: single letter (or "X:") → volume filter
+    // Mode B: longer string           → path prefix filter (converted to NT device path)
+    std::string filterNT;    // NT device path prefix used for matching
+    char filterDrive = 0;    // set only in mode A for display
+    bool isPathFilter = false;
+
     if (filter && filter[0] && filter[0] != '?') {
-        filterDrive = (char)toupper((unsigned char)filter[0]);
-        filterPath  = ResolveVolume(filterDrive);
-        if (filterPath.empty()) {
-            printf("%s[!]%s Cannot resolve NT device path for %c:\n",
-                   A_RED, A_RESET, filterDrive);
-            return;
+        size_t flen = strlen(filter);
+        bool isDriveLetter = (flen == 1) ||
+                             (flen == 2 && (filter[1] == ':' || filter[1] == '\\'));
+
+        if (isDriveLetter) {
+            filterDrive = (char)toupper((unsigned char)filter[0]);
+            filterNT    = ResolveVolume(filterDrive);
+            if (filterNT.empty()) {
+                printf("%s[!]%s Cannot resolve NT device path for %c:\n",
+                       A_RED, A_RESET, filterDrive);
+                return;
+            }
+            if (!g_jsonMode)
+                printf("%s[*]%s %c: -> %s\n\n", A_CYAN, A_RESET, filterDrive, filterNT.c_str());
+        } else {
+            // Path filter: "C:\foo\bar" or "C:/foo/bar"
+            isPathFilter = true;
+            char dl = (char)toupper((unsigned char)filter[0]);
+            std::string ntBase = ResolveVolume(dl);
+            if (ntBase.empty()) {
+                printf("%s[!]%s Cannot resolve NT device path for %c:\n",
+                       A_RED, A_RESET, dl);
+                return;
+            }
+            // Skip "C:" or "C:\" prefix, normalize separators
+            const char* rest = filter + (flen > 1 && filter[1] == ':' ? 2 : 1);
+            std::string restStr(rest);
+            for (char& c : restStr) if (c == '/') c = '\\';
+            // Ensure single leading backslash
+            if (!restStr.empty() && restStr[0] != '\\') restStr = "\\" + restStr;
+            // Remove trailing separator for prefix matching
+            while (restStr.size() > 1 && restStr.back() == '\\') restStr.pop_back();
+            filterNT = ntBase + restStr;
+            if (!g_jsonMode)
+                printf("%s[*]%s Path filter: %s\n\n", A_CYAN, A_RESET, filterNT.c_str());
         }
-        if (!g_jsonMode)
-            printf("%s[*]%s %c: -> %s\n\n", A_CYAN, A_RESET, filterDrive, filterPath.c_str());
+    }
+
+    if (doClose && filterNT.empty()) {
+        printf("%s[!]%s --close requires a path or drive filter\n", A_RED, A_RESET);
+        return;
     }
 
     // Fetch full system handle table (grows until buffer is large enough)
@@ -179,12 +219,13 @@ void CmdHandles(const char* filter) {
     bool   jsonFirst = true;
 
     if (g_jsonMode) {
-        char fdrStr[4] = { filterDrive, ':', '\0' };
-        printf("{\"command\":\"handles\",\"filter\":%s,\"handles\":[\n",
-               filterDrive ? JEscape(fdrStr).c_str() : "null");
+        const char* fkey = filterNT.empty() ? "null" : JEscape(filterNT.c_str()).c_str();
+        printf("{\"command\":\"handles\",\"filter\":%s,\"close\":%s,\"handles\":[\n",
+               filterNT.empty() ? "null" : JEscape(filterNT.c_str()).c_str(),
+               doClose ? "true" : "false");
     }
     else {
-        printf("%-8s  %-24s  %s\n", "PID", "Process", "Path");
+        printf("%-8s  %-24s  %-8s  %s\n", "PID", "Process", "Handle", "Path");
         printf("%s\n", std::string(120, '-').c_str());
     }
 
@@ -243,30 +284,54 @@ void CmdHandles(const char* filter) {
         CloseHandle(hDup);
         if (pathLen == 0) continue;
 
-        // Apply volume filter (file handles)
-        if (!isDevHandle && !filterPath.empty() &&
-            _strnicmp(pathBuf, filterPath.c_str(), filterPath.size()) != 0)
-            continue;
+        // Apply path/volume filter (file handles)
+        if (!isDevHandle && !filterNT.empty()) {
+            // Prefix match: handle path must start with filterNT
+            // Also accept exact match (filterNT == pathBuf)
+            size_t flen = filterNT.size();
+            bool match = _strnicmp(pathBuf, filterNT.c_str(), flen) == 0 &&
+                         (pathBuf[flen] == '\0' || pathBuf[flen] == '\\');
+            if (!match) continue;
+        }
+        if (isDevHandle && !filterNT.empty()) continue; // path filter → skip device handles
 
         const char* proc = ProcName(pid);
         count++;
 
+        // ── Close handle if requested ─────────────────────────────────────────
+        bool closed = false;
+        if (doClose) {
+            HANDLE hClose = nullptr;
+            if (DuplicateHandle(hProc, (HANDLE)(ULONG_PTR)e.HandleValue,
+                                GetCurrentProcess(), &hClose,
+                                0, FALSE, DUPLICATE_CLOSE_SOURCE)) {
+                if (hClose) CloseHandle(hClose);
+                closed = true;
+            }
+        }
+
         if (g_jsonMode) {
             if (!jsonFirst) printf(",\n");
             jsonFirst = false;
-            printf(" {\"pid\":%u,\"process\":%s,\"handle\":\"0x%X\",\"path\":%s%s}",
+            printf(" {\"pid\":%u,\"process\":%s,\"handle\":\"0x%X\",\"path\":%s%s%s}",
                    pid, JEscape(proc).c_str(), (unsigned)e.HandleValue,
                    JEscape(pathBuf).c_str(),
-                   isDevHandle ? ",\"type\":\"device\"" : "");
+                   isDevHandle ? ",\"type\":\"device\"" : "",
+                   doClose ? (closed ? ",\"closed\":true" : ",\"closed\":false") : "");
         } else {
-            printf("%s%-8u%s  %-24s  %s\n", A_YELLOW, pid, A_RESET, proc, pathBuf);
+            printf("%s%-8u%s  %-24s  0x%-6X  %s",
+                   A_YELLOW, pid, A_RESET, proc, (unsigned)e.HandleValue, pathBuf);
+            if (doClose)
+                printf("  %s", closed ? "\x1b[32m[closed]\x1b[0m" : "\x1b[31m[close failed]\x1b[0m");
+            printf("\n");
         }
     }
 
     if (hProc) CloseHandle(hProc);
 
     if (g_jsonMode)
-        printf("\n],\"total\":%d}\n", count);
+        printf("\n],\"total\":%d%s}\n", count, doClose ? ",\"closed\":true" : "");
     else
-        printf("\n%s[*]%s %d handle(s) found\n", A_CYAN, A_RESET, count);
+        printf("\n%s[*]%s %d handle(s) found%s\n", A_CYAN, A_RESET, count,
+               doClose ? " (closed)" : "");
 }

@@ -3,6 +3,7 @@
 #include <TlHelp32.h>
 #include <cstdio>
 #include <string>
+#include <vector>
 #include "kutil.h"
 #include "driver/IDriverBackend.h"
 #include "globals.h"
@@ -164,4 +165,130 @@ void CmdKill(DWORD pid) {
     // Restore protection if kill still failed
     printf("[!] Still failed (err=%lu). Restoring protection.\n", GetLastError());
     g_drv->Wr8(eproc + KUtil::EP_Protection, origProt);
+}
+
+// ─── /proc-token <pid> ───────────────────────────────────────────────────────
+// Show full privilege/security profile for a process:
+//   User, Session, Integrity, Elevation type, PPL protection, Privileges list.
+// Complements /proc (which shows protection+integrity per row in the full list).
+
+static const char* ElevTypeStr(TOKEN_ELEVATION_TYPE t) {
+    switch (t) {
+        case TokenElevationTypeDefault: return "Default (no UAC split)";
+        case TokenElevationTypeFull:    return "Full (elevated)";
+        case TokenElevationTypeLimited: return "Limited (UAC-split, unelevated side)";
+        default: return "Unknown";
+    }
+}
+
+static const char* PrivAttrStr(DWORD attr) {
+    if (attr & SE_PRIVILEGE_ENABLED)            return "Enabled";
+    if (attr & SE_PRIVILEGE_ENABLED_BY_DEFAULT) return "Default";
+    return "Disabled";
+}
+
+void CmdProcToken(DWORD pid) {
+    // Open process — try with full token access first, fall back if denied
+    HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!hProc) hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hProc) {
+        printf("%s[!]%s Cannot open PID=%lu (err %lu). Try running as SYSTEM.\n",
+               A_RED, A_RESET, pid, GetLastError());
+        return;
+    }
+
+    HANDLE hTok = nullptr;
+    if (!OpenProcessToken(hProc, TOKEN_QUERY, &hTok)) {
+        printf("%s[!]%s OpenProcessToken failed (err %lu).\n", A_RED, A_RESET, GetLastError());
+        CloseHandle(hProc);
+        return;
+    }
+    CloseHandle(hProc);
+
+    printf("\n%s=== Token profile: PID=%lu ===%s\n", A_BOLD, pid, A_RESET);
+
+    // ── User ──────────────────────────────────────────────────────────────────
+    {
+        DWORD needed = 0;
+        GetTokenInformation(hTok, TokenUser, nullptr, 0, &needed);
+        std::vector<BYTE> buf(needed);
+        if (GetTokenInformation(hTok, TokenUser, buf.data(), needed, &needed)) {
+            auto* tu = reinterpret_cast<TOKEN_USER*>(buf.data());
+            char name[64] = {}, domain[64] = {};
+            DWORD nl = sizeof(name), dl = sizeof(domain);
+            SID_NAME_USE use;
+            if (LookupAccountSidA(nullptr, tu->User.Sid, name, &nl, domain, &dl, &use))
+                printf("  User       : %s\\%s\n", domain, name);
+            else
+                printf("  User       : (SID lookup failed err %lu)\n", GetLastError());
+        }
+    }
+
+    // ── Session ───────────────────────────────────────────────────────────────
+    {
+        DWORD session = 0, needed = sizeof(session);
+        if (GetTokenInformation(hTok, TokenSessionId, &session, needed, &needed))
+            printf("  Session    : %lu\n", session);
+    }
+
+    // ── Integrity level ───────────────────────────────────────────────────────
+    {
+        DWORD needed = 0;
+        GetTokenInformation(hTok, TokenIntegrityLevel, nullptr, 0, &needed);
+        std::vector<BYTE> buf(needed);
+        if (GetTokenInformation(hTok, TokenIntegrityLevel, buf.data(), needed, &needed)) {
+            auto* til = reinterpret_cast<TOKEN_MANDATORY_LABEL*>(buf.data());
+            DWORD rid = *GetSidSubAuthority(til->Label.Sid,
+                            *GetSidSubAuthorityCount(til->Label.Sid) - 1);
+            const char* col = (rid >= 0x4000) ? A_CYAN : (rid >= 0x3000) ? A_YELLOW : A_DIM;
+            printf("  Integrity  : %s%s%s (RID=0x%lX)\n",
+                   col, IntegrityStr(rid), A_RESET, rid);
+        }
+    }
+
+    // ── Elevation type ────────────────────────────────────────────────────────
+    {
+        TOKEN_ELEVATION_TYPE et = TokenElevationTypeDefault;
+        DWORD needed = sizeof(et);
+        if (GetTokenInformation(hTok, TokenElevationType, &et, needed, &needed)) {
+            const char* col = (et == TokenElevationTypeFull) ? A_GREEN :
+                              (et == TokenElevationTypeLimited) ? A_YELLOW : "";
+            printf("  Elevation  : %s%s%s\n", col, ElevTypeStr(et), A_RESET);
+        }
+    }
+
+    // ── PPL protection (from EPROCESS via kernel) ─────────────────────────────
+    {
+        DWORD64 eproc = KUtil::FindEPROCESS(pid);
+        if (eproc) {
+            BYTE prot = g_drv->Rd8(eproc + KUtil::EP_Protection);
+            const char* col = (prot & 0x7) == 2 ? A_CYAN :
+                              (prot & 0x7) == 1 ? A_YELLOW : A_DIM;
+            printf("  Protection : %s0x%02X (%s)%s\n",
+                   col, prot, KUtil::ProtectionStr(prot), A_RESET);
+        }
+    }
+
+    // ── Privileges ────────────────────────────────────────────────────────────
+    {
+        DWORD needed = 0;
+        GetTokenInformation(hTok, TokenPrivileges, nullptr, 0, &needed);
+        std::vector<BYTE> buf(needed);
+        if (GetTokenInformation(hTok, TokenPrivileges, buf.data(), needed, &needed)) {
+            auto* tp = reinterpret_cast<TOKEN_PRIVILEGES*>(buf.data());
+            printf("  Privileges : (%lu total)\n", tp->PrivilegeCount);
+            for (DWORD i = 0; i < tp->PrivilegeCount; i++) {
+                char privName[64] = {};
+                DWORD nl = sizeof(privName);
+                LookupPrivilegeNameA(nullptr, &tp->Privileges[i].Luid, privName, &nl);
+                DWORD attr = tp->Privileges[i].Attributes;
+                const char* col = (attr & SE_PRIVILEGE_ENABLED) ? A_GREEN : A_DIM;
+                printf("    %s%-40s %s%s\n",
+                       col, privName, PrivAttrStr(attr), A_RESET);
+            }
+        }
+    }
+
+    CloseHandle(hTok);
+    printf("\n");
 }

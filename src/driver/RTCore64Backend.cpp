@@ -1,4 +1,5 @@
 #include "RTCore64Backend.h"
+#include <cstdio>
 
 struct RTCORE64_MEMORY_OP {
     BYTE    Pad0[8];
@@ -104,10 +105,13 @@ DWORD64 RTCore64Backend::MapPhys(DWORD64 pa, DWORD size) {
     } req{};
     req.PhysAddr = pa;
     req.Size     = size;
-    DWORD n;
-    DeviceIoControl(hDev, IOCTL_MAP_PHYS,
-                    &req, sizeof(req), &req, sizeof(req), &n, nullptr);
-    if (!IsKernelVA(req.VirtAddr)) return 0;
+    DWORD n = 0;
+    BOOL ok = DeviceIoControl(hDev, IOCTL_MAP_PHYS,
+                              &req, sizeof(req), &req, sizeof(req), &n, nullptr);
+    // Accept any canonical kernel-half VA (top 16 bits all-1s)
+    if (!ok || (req.VirtAddr >> 48) != 0xFFFFULL) {
+        return 0;
+    }
     return req.VirtAddr;
 }
 

