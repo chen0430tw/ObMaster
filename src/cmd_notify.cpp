@@ -384,6 +384,25 @@ void CmdNotifyDisable(unsigned long long targetFn) {
 // Validate that a kernel VA looks like a CmpCallBackVector (EX_CALLBACK array):
 // at least one slot in [0..CM_ARRAY_MAX) must decode to a valid EX_CALLBACK_ROUTINE_BLOCK
 // with a kernel-range function pointer that does NOT fall back into the array itself.
+// Check if a byte is a valid x64 function prologue start
+static bool IsValidPrologue(BYTE b) {
+    // Common x64 function prologues:
+    //   48 (REX.W prefix for mov/sub/push)
+    //   4C (REX.WR prefix)
+    //   40-4F (any REX prefix)
+    //   55 (push rbp)
+    //   53 (push rbx)
+    //   56 (push rsi)
+    //   57 (push rdi)
+    //   41 (REX.B for push r8-r15)
+    //   CC (int3 padding before function - skip, check next byte)
+    //   E9 (jmp - thunk)
+    //   Sub rsp: starts with 48 83 EC
+    return (b >= 0x40 && b <= 0x4F) || // REX prefixes
+           b == 0x53 || b == 0x55 || b == 0x56 || b == 0x57 || // push regs
+           b == 0xE9 || b == 0x33 || b == 0x8B || b == 0x89;   // jmp/xor/mov
+}
+
 static bool LooksLikeCmArray(DWORD64 va)
 {
     // Require at least one slot that:
@@ -391,9 +410,17 @@ static bool LooksLikeCmArray(DWORD64 va)
     //  2. block + 0x00 (RundownProtect) is NOT a kernel VA (should be 0 or tiny ref count)
     //  3. fn = block + 0x08 is a kernel VA not in the array
     //  4. fn resolves to a KNOWN loaded driver (not <unknown>)
+    //  5. fn first byte is a valid x64 function prologue (not data/pointer)
+    //
+    // Also: count valid vs total non-zero slots. If < 50% valid, reject.
+    // (dispatch tables have many entries that fail prologue check)
+    int totalNonZero = 0, validEntries = 0;
+
     for (int i = 0; i < CM_ARRAY_MAX; i++) {
         DWORD64 raw = g_drv->Rd64(va + (DWORD64)i * 8);
         if (!raw) continue;
+        totalNonZero++;
+
         DWORD64 block = raw & ~(DWORD64)0xF;
         if (!g_drv->IsKernelVA(block)) continue;
         if (block >= va && block < va + (DWORD64)CM_ARRAY_MAX * 8) continue;
@@ -411,11 +438,31 @@ static bool LooksLikeCmArray(DWORD64 va)
         KUtil::FindDriverByAddr(fn, &owner, &off);
         if (!owner || owner[0] == L'\0') continue;
 
-        DBG("    LooksLikeCmArray: slot[%d] block=%p fn=%p owner=%ls OK\n",
-            i, (void*)block, (void*)fn, owner);
-        return true;
+        // NEW: fn first byte must be a valid x64 prologue instruction
+        // This rejects dispatch table entries where "fn" is actually a data pointer
+        BYTE firstByte = g_drv->Rd8(fn);
+        if (!IsValidPrologue(firstByte)) {
+            DBG("    LooksLikeCmArray: slot[%d] fn=%p firstByte=0x%02X (not prologue) -> skip\n",
+                i, (void*)fn, firstByte);
+            continue;
+        }
+
+        validEntries++;
+        DBG("    LooksLikeCmArray: slot[%d] block=%p fn=%p owner=%ls prologue=0x%02X OK\n",
+            i, (void*)block, (void*)fn, owner, firstByte);
     }
-    return false;
+
+    // Dispatch tables have many non-zero slots but most fail prologue check.
+    // Real CmpCallBackVector: few entries (1-10), all valid.
+    // Reject if too many non-zero slots with no valid entries (dispatch table).
+    if (validEntries == 0) return false;
+    if (totalNonZero > 20 && validEntries < 2) {
+        DBG("    LooksLikeCmArray: suspicious ratio %d/%d (too many bad slots)\n",
+            validEntries, totalNonZero);
+        return false;
+    }
+    DBG("    LooksLikeCmArray: accepted (%d valid / %d total)\n", validEntries, totalNonZero);
+    return true;
 }
 
 static DWORD64 FindCmpCallBackVector(HMODULE hNt, DWORD64 userBase, DWORD64 kernBase)
@@ -427,7 +474,8 @@ static DWORD64 FindCmpCallBackVector(HMODULE hNt, DWORD64 userBase, DWORD64 kern
     // then pick the first one that passes the EX_CALLBACK array validation.
     std::vector<DWORD64> candidates;
 
-    const char* probes[] = { "CmUnRegisterCallback", "CmRegisterCallback", nullptr };
+    const char* probes[] = { "CmUnRegisterCallback", "CmRegisterCallback",
+                              "CmRegisterCallbackEx", nullptr };
     for (int p = 0; probes[p]; p++) {
         BYTE* fn = (BYTE*)GetProcAddress(hNt, probes[p]);
         if (!fn) { DBG("%s: not found\n", probes[p]); continue; }

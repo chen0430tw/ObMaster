@@ -36,6 +36,7 @@
 #include "kutil.h"
 #include "driver/IDriverBackend.h"
 #include "globals.h"
+#include "ansi.h"
 #include "commands.h"
 
 #define DRVOBJ_DRIVER_UNLOAD  0x068
@@ -375,6 +376,28 @@ void CmdForceUnload(const char* drvName, DWORD64 drvObjVA) {
     if (!g_drv->IsKernelVA(drvObjVA)) {
         printf("[!] DRIVER_OBJECT address is not a valid kernel VA\n");
         return;
+    }
+
+    // Pre-flight: check DeviceObject chain and warn about zombie risk
+    {
+        DWORD64 devObj = g_drv->Rd64(drvObjVA + 0x08);
+        int devCount = 0;
+        DWORD64 cur = devObj;
+        while (g_drv->IsKernelVA(cur) && devCount < 32) {
+            devCount++;
+            cur = g_drv->Rd64(cur + 0x10); // NextDevice
+        }
+        if (devCount > 0) {
+            printf("%s[!]%s WARNING: %d DeviceObject(s) still attached.\n"
+                   "    The ret stub won't call IoDeleteDevice — driver may become ZOMBIE.\n"
+                   "    Recommended: tear down references first:\n"
+                   "      /disable <obcb_addr>           (remove ObCallback refs)\n"
+                   "      /ndisable <notify_addr>        (remove notify refs)\n"
+                   "      /flt-detach %s C:              (remove minifilter refs)\n"
+                   "      /notify registry --kill %s     (remove CmCallback + unlock SCM)\n"
+                   "    Then retry /drv-unload.\n\n",
+                   A_YELLOW, A_RESET, devCount, drvName, drvName);
+        }
     }
 
     // Validate signature: Type=4, Size=0x150 → first DWORD = 0x01500004
