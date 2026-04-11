@@ -228,18 +228,15 @@ void CmdSafePatchRestore(DWORD64 addr) {
         VirtualProtect(rec->shadow_va, 4096, PAGE_EXECUTE_READWRITE, &old);
         FreePatchShadow(*rec);
     } else {
-        // Restore bytes via aligned Wr32
-        DWORD64 alignedBase = rec->addr & ~3ULL;
-        DWORD64 alignedEnd  = (rec->addr + rec->len + 3) & ~3ULL;
-        for (DWORD64 waddr = alignedBase; waddr < alignedEnd; waddr += 4) {
-            DWORD cur = g_drv->Rd32(waddr);
-            DWORD newV = cur;
-            DWORD64 lo = (rec->addr > waddr) ? rec->addr - waddr : 0;
-            DWORD64 hi = std::min((DWORD64)4, rec->addr + rec->len - waddr);
-            for (DWORD64 b = lo; b < hi; b++)
-                ((BYTE*)&newV)[b] = rec->orig[(waddr + b) - rec->addr];
-            g_drv->Wr32(waddr, newV);
-        }
+        // Non-shadow patch record — this should not happen in normal operation.
+        // Direct Wr32 to kernel code pages will BSOD (PTE.Write=0 → 0xBE).
+        // Refuse to restore and warn the user.
+        printf("  %s[!]%s  No shadow page record — cannot restore safely.\n", A_RED, A_RESET);
+        printf("       Direct Wr32 to kernel code pages would cause BSOD 0xBE.\n");
+        printf("       The original bytes were: ");
+        for (size_t i = 0; i < rec->len; i++) printf("%02X ", rec->orig[i]);
+        printf("\n       Use /wr64 manually if target is in writable memory (data section).\n");
+        return;
     }
 
     rec->active = false;

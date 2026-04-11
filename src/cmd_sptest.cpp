@@ -81,6 +81,15 @@ static bool Stage1(DWORD64 addr) {
     printf("\n%s[Stage 1]%s  Read PTE @ 0x%016llX (no write)\n",
            A_CYAN, A_RESET, addr);
 
+    // Large page check — MUST be before ReadPte, because ReadPte on a large
+    // page returns garbage (PteVaOf points into PDE region, not PTE region).
+    if (IsLargePage(addr)) {
+        printf("  %s[SKIP]%s  Target is on a 2MB large page (PDE.PS=1)\n", A_YELLOW, A_RESET);
+        printf("           No 4KB PTE exists — safepatch cannot work here.\n");
+        printf("           Choose an address on a 4KB page (e.g. a third-party driver).\n");
+        return false;
+    }
+
     PteInfo pte = ReadPte(addr);
     if (!pte.valid) {
         printf("  %s[FAIL]%s  MmPteBase unavailable — PTE read failed\n", A_RED, A_RESET);
@@ -99,7 +108,7 @@ static bool Stage1(DWORD64 addr) {
         printf("  %s[FAIL]%s  Page not present\n", A_RED, A_RESET);
         return false;
     }
-    printf("  %s[PASS]%s  PTE read OK\n", A_GREEN, A_RESET);
+    printf("  %s[PASS]%s  PTE read OK (4KB page confirmed)\n", A_GREEN, A_RESET);
     return true;
 }
 
@@ -107,7 +116,14 @@ static bool Stage1(DWORD64 addr) {
 static bool Stage2(DWORD64 addr) {
     printf("\n%s[Stage 2]%s  No-op PTE write (write same value back)\n",
            A_CYAN, A_RESET);
-    printf("  If this causes BSOD → HVCI is blocking PTE writes\n");
+    printf("  If this causes BSOD → PTE page is read-only or HVCI blocks writes\n");
+
+    // Stage 1 already checked large page, but guard again in case Stage2
+    // is called independently in the future.
+    if (IsLargePage(addr)) {
+        printf("  %s[SKIP]%s  Large page — no PTE to write\n", A_YELLOW, A_RESET);
+        return false;
+    }
 
     PteInfo pte = ReadPte(addr);
     if (!pte.valid || !pte.present) {
@@ -131,7 +147,7 @@ static bool Stage2(DWORD64 addr) {
     } else {
         printf("  %s[FAIL]%s  Readback mismatch (expected 0x%016llX got 0x%016llX)\n",
                A_RED, A_RESET, pte.pte_val, readback);
-        printf("          If HVCI is active it may silently discard PTE writes\n");
+        printf("          Likely: PTE page is read-only (Win10 19041+) or HVCI active\n");
         return false;
     }
 }
