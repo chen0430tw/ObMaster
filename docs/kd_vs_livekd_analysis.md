@@ -247,6 +247,58 @@ ObMaster 路径:
 | BSOD 风险 | 低 | 中 | 低 |
 | 更新状态 | 活跃 (WDK) | 停更 (2020) | 自维护 |
 
+## 9. 实战速查命令
+
+### kd.exe 位置
+```
+C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\kd.exe
+```
+
+### 常用命令（需要 `bcdedit -debug on` + 管理员）
+
+**读 MmPteBase（最可靠方法）：**
+```bash
+sudo "C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/kd.exe" -kl -c "dq nt!MmPteBase L1; q"
+```
+
+**读任意内核符号：**
+```bash
+# 读 PsInitialSystemProcess
+sudo kd.exe -kl -c "dq nt!PsInitialSystemProcess L1; q"
+
+# 读 MmPfnDatabase
+sudo kd.exe -kl -c "dq nt!MmPfnDatabase L1; q"
+
+# 查符号地址
+sudo kd.exe -kl -c "x nt!MmPteBase; q"
+
+# 查内核基址
+sudo kd.exe -kl -c "? nt; q"
+
+# 查 EPROCESS 布局
+sudo kd.exe -kl -c "dt nt!_EPROCESS; q"
+```
+
+**验证 MmPteBase 正确性：**
+```bash
+# 1. 用 kd 读真实值
+sudo kd.exe -kl -c "dq nt!MmPteBase L1; q"
+# 输出: fffff805`656fb358  ffffc180`00000000
+#                          ^^^^^^^^^^^^^^^^^ 这就是 MmPteBase
+
+# 2. 手动设入 ObMaster
+ObMaster /ptebase-set FFFFC18000000000
+
+# 3. 验证 PTE walk
+ObMaster /pte <ntoskrnl_base>
+```
+
+### 注意事项
+- kd.exe 读到的值是**当前开机的实时值**，每次重启后 KASLR 会变
+- 蓝屏重启后必须重新读取，之前的值无效
+- ObMaster 的自动扫描（12 种方法）可能受 DKOM 干扰，kd.exe 是最终仲裁
+- `-kl` 是 local kernel debug，只读不写，不会修改内核状态
+
 三种方法的核心都是 **dbghelp.dll 符号解析**，区别仅在于内核内存的读取方式。
 
 ## 9. LiveKdD.SYS 驱动深度分析
