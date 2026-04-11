@@ -577,70 +577,168 @@ ObMaster /obcb                    # 找到 ksafecenter64 PreOp 地址
 ObMaster /disable <PreOp_addr>    # 清零 PreOp → IsProtectedPid 永不调用 → 无瞬态句柄
 ```
 
-### 僵尸驱动完整分析 (ppm 确认)
+### 僵尸驱动完整分析 (ppm v0.2.2 深度分析 + 2026-04-11 更新)
 
-**为什么 `/force-stop` 卸不掉:**
+#### ppm-engine 分析结论
 
-`/force-stop` 往 DriverUnload (+0x68) 写入 `xor eax,eax; ret` stub，
-让 NtUnloadDriver → IopUnloadDriver 能调用 DriverUnload 不报错。
-
-但 stub 只是 `return 0`，没有做任何清理。IopUnloadDriver 内部：
-```c
-DriverObject->DriverUnload(DriverObject);  // ← stub 直接返回
-if (DriverObject->DeviceObject != NULL)
-    return;  // ← 设备对象还在！不释放！→ 僵尸
+```
+ksafecenter64.sys: PE64_DRIVER, x64, packed=False
+  Imports: 94 from 2 libraries (ntoskrnl.exe + FLTMGR.SYS)
+  Functions: 252, roots: 21
+  Depgraph: 539 nodes, 528 edges
+  Patterns: cm_callback (0.85), ob_callback (0.75)
+  Chains: 18 (handle manipulation ×6, callback reg ×4, ob_callback ×4, cm_callback ×4)
+  Type: protection_minifilter
+  Self-protection:
+    - No DriverUnload export — 不可正常卸载
+    - Registry callback — 保护自己的注册表键
+    - Object callbacks — 可剥夺 handle 访问权限
 ```
 
-**为什么 `/drv-unload` 也卸不掉:**
+#### 四层防护架构 (ppm depgraph 确认)
 
-`/drv-unload` 走 SCM 路径 (ControlService SERVICE_CONTROL_STOP)，
-但 ksafecenter64 的 CmCallback (0x7C20) 拦截注册表写入：
-```
-SCM 需要修改 HKLM\SYSTEM\CurrentControlSet\Services\ksafecenter64
-→ CmCallback 返回 STATUS_ACCESS_DENIED (0xC0000022)
-→ OpenService 失败: error 5 (ACCESS_DENIED)
-```
-CmCallback 保护了自己的服务注册表键，形成死锁：要卸载它就得改注册表，改注册表被它自己拦截。
+DriverEntry (`sub_1458`) 注册四层防护，顺序为：
 
-**PointerCount 引用来源 (ppm 逐层确认):**
+```
+sub_1458 (DriverEntry)
+  ├─ sub_15A8 → IoCreateDevice("\Device\SafeCenter", "\Device\SFFireWall")
+  ├─ sub_69B4 → PsSetLoadImageNotifyRoutine    ← 层1: DLL 加载监控
+  ├─ sub_7938 → sub_74FC → ObRegisterCallbacks  ← 层2: handle 访问拦截
+  ├─ sub_7A08 → CmRegisterCallbackEx            ← 层3: 注册表保护
+  └─ (FltRegisterFilter 在 sub_221C 子树)       ← 层4: 文件系统过滤
+```
+
+#### 死代码证据 — 清理函数存在但从未被调用
+
+| 函数 | 功能 | 调用者 |
+|------|------|--------|
+| `sub_7894` → `ObUnRegisterCallbacks` | 注销 ObCallback | **无！死代码** |
+| `FltUnregisterFilter` | 注销 minifilter | **无调用链到达** |
+| `PsRemoveLoadImageNotifyRoutine` | 注销 notify | **无调用链到达** |
+
+驱动导入了 `ObUnRegisterCallbacks`、`FltUnregisterFilter`、`PsRemoveLoadImageNotifyRoutine`
+三个注销 API，但 ppm depgraph `who_calls` 确认：**所有注销函数都是死代码，没有任何执行路径会调用它们**。
+
+这意味着即使有 DriverUnload，它也不会做任何清理 — 开发者写了注销代码但从未接线。
+
+#### 为什么变僵尸 — 五层死锁
+
+**第 1 层：无 DriverUnload**
+```
+DriverObject->DriverUnload = NULL
+→ NtUnloadDriver 直接拒绝: STATUS_INVALID_DEVICE_REQUEST
+→ sc stop / net stop 报 error 1052
+```
+
+**第 2 层：DeviceObject 残留**
+```
+/force-stop 写入 DriverUnload stub (xor eax,eax; ret)
+→ NtUnloadDriver 调用 stub → return 0
+→ IopUnloadDriver 检查 DriverObject->DeviceObject != NULL
+→ 设备 \Device\SafeCenter + \Device\SFFireWall 还在
+→ 拒绝释放 DRIVER_OBJECT → 僵尸
+```
+
+**第 3 层：CmCallback 注册表死锁**
+```
+/drv-unload 走 SCM 路径 (ControlService SERVICE_CONTROL_STOP)
+→ SCM 需要修改 HKLM\...\Services\ksafecenter64
+→ CmCallback (sub_7A08, cookie at RVA 0x15A58) 拦截
+→ STATUS_ACCESS_DENIED (0xC0000022)
+→ OpenService 失败: error 5
+```
+
+**第 4 层：ObCallback 句柄保护**
+```
+即使绕过注册表保护，尝试 OpenProcess 杀进程
+→ ObCallback PreOp (sub_74FC) 拦截
+→ 剥夺 PROCESS_TERMINATE 权限
+→ TerminateProcess 失败
+```
+
+**第 5 层：ImageNotify 监控重生**
+```
+PsSetLoadImageNotifyRoutine (sub_69B4)
+→ 监控所有 DLL/EXE 加载
+→ 可在进程启动时立即注入保护
+→ 杀了用户态组件也能重建
+```
+
+#### PointerCount 引用来源 (ppm 逐层确认)
 ```
 +1  DRIVER_OBJECT body (始终存在)
-+1  \Device\SafeCenter (DeviceObject)
-+1  \Device\SFFireWall (DeviceObject)
-+N  ObRegisterCallbacks 注册 (PreOp/PostOp 回调)
-+1  CmRegisterCallbackEx 注册 (cookie 存在 RVA 0x15A58)
-+1  FltRegisterFilter minifilter 实例
-+1  PsSetLoadImageNotifyRoutine 注册
-+1  Object Directory \Driver\ksafecenter64 引用
++1  \Device\SafeCenter (IoCreateDevice, sub_15A8)
++1  \Device\SFFireWall (IoCreateDevice, sub_15A8)
++N  ObRegisterCallbacks (sub_74FC → sub_7938)
++1  CmRegisterCallbackEx (sub_7A08, cookie at RVA 0x15A58)
++1  FltRegisterFilter minifilter (sub_221C 子树)
++1  PsSetLoadImageNotifyRoutine (sub_69B4)
++1  Object Directory \Driver\ksafecenter64
 ```
 
-**正确的完整卸载顺序（逆序拆引用）:**
+#### 正确的完整卸载顺序（逆序拆引用 — "倒着拆弹"）
+
+必须按注册的**逆序**拆除每层防护。正序拆会触发死锁或僵尸状态。
+
 ```bash
-# 1. 撤销 ObCallback (PointerCount -N)
+# 步骤 1. 杀 CmCallback — 解除注册表保护死锁 (最优先！)
+# 不先杀这个，后面所有 SCM 操作都会被拦截
+ObMaster /notify registry --kill ksafecenter64
+
+# 步骤 2. 撤销 ObCallback — 解除句柄保护
 ObMaster /obcb
 ObMaster /disable <PreOp_addr>
 
-# 2. 撤销 notify routines (PointerCount -1 each)
-ObMaster /notify process
-ObMaster /ndisable <ksafe_notify_addr>
+# 步骤 3. 撤销 ImageNotify — 解除加载监控
 ObMaster /notify image
-ObMaster /ndisable <ksafe_image_addr>
+ObMaster /ndisable <ksafe_image_notify_addr>
 
-# 3. 卸 minifilter instance (PointerCount -1)
+# 步骤 4. 卸 minifilter — 解除文件系统过滤
 ObMaster /flt-detach ksafecenter64 C:
 
-# 4. 杀 CmCallback — 解除注册表保护死锁 (PointerCount -1)
-ObMaster /notify registry --kill ksafecenter64
+# 步骤 5. 删除 DeviceObject — 防止 IopUnloadDriver 僵尸检查
+# (需要手动 Wr64 清零 DriverObject->DeviceObject 链)
 
-# 5. PointerCount 降到接近 1 后，force-stop
+# 步骤 6. force-stop — 此时所有引用已拆，可以安全卸载
 ObMaster /force-stop ksafecenter64
 
-# 6. 如果 auto-discovery 失败 (DKOM)，手动取地址
+# 步骤 7. 如果 auto-discovery 失败 (DKOM)，手动取地址
 ObMaster /objdir \Driver
 ObMaster /drv-unload ksafecenter64 <drvobj_va>
 ```
 
 **关键: 不按顺序拆会变僵尸。必须先拆引用再卸载。**
+
+**为什么必须倒序:**
+```
+注册顺序:  Device → ImageNotify → ObCallback → CmCallback → MiniFilter
+拆除顺序:  CmCallback → ObCallback → ImageNotify → MiniFilter → Device → Unload
+           ↑ 必须最先拆，否则后续 SCM 操作全部被拦截
+```
+
+#### 保护的进程 (ppm strings 确认)
+```
+explorer.exe     — 桌面进程（防篡改桌面快捷方式）
+360chrome.exe    — 360 浏览器（网吧默认浏览器，防替换）
+```
+
+#### 保护的注册表路径
+```
+\Registry\Machine\SOFTWARE\kSafeCenter         — 配置
+\Registry\Machine\System\CurrentControlSet      — 服务注册表
+```
+
+#### 文件系统过滤 (FsFilter1)
+ppm 字符串确认驱动包含完整的目录枚举过滤：
+```
+CleanFileFullDirectoryInformation       — 隐藏文件（完整信息查询）
+CleanFileBothDirectoryInformation       — 隐藏文件（双信息查询）
+CleanFileDirectoryInformation           — 隐藏文件（基本查询）
+CleanFileIdFullDirectoryInformation     — 隐藏文件（带 FileId）
+CleanFileIdBothDirectoryInformation     — 隐藏文件（带 FileId 双查询）
+CleanFileNamesInformation               — 隐藏文件名
+```
+这意味着 ksafecenter64 可以在 `FindFirstFile/FindNextFile` 层面隐藏任意文件。
 
 ---
 
