@@ -104,6 +104,7 @@ struct NotifyEntry {
     DWORD64 ownerOff;
     const wchar_t* ctxOwner;   // driver owning the context pointer
     DWORD64 ctxOwnerOff;
+    bool    isLinkedList;   // true = CallbackListHead node, false = EX_CALLBACK array slot
 };
 
 static std::vector<NotifyEntry> ScanArray(DWORD64 arrayKVA) {
@@ -160,6 +161,7 @@ static std::vector<NotifyEntry> ScanArray(DWORD64 arrayKVA) {
         e.slotAddr     = slotAddr;
         e.routineBlock = block;
         e.function     = fn;
+        e.isLinkedList = false;
         KUtil::FindDriverByAddr(fn, &e.owner, &e.ownerOff);
         v.push_back(e);
     }
@@ -727,12 +729,13 @@ void CmdNotifyRegistry(const char* killDriver, DWORD64 killKva, bool killUnknown
 
                     NotifyEntry e{};
                     e.index        = idx;
-                    e.slotAddr     = cur;       // node address (for --kill)
+                    e.slotAddr     = cur;       // node address (for --kill: LIST_ENTRY unlink)
                     e.routineBlock = cur;
                     e.function     = fn;
                     e.context      = ctx;
                     e.ctxOwner     = nullptr;
                     e.ctxOwnerOff  = 0;
+                    e.isLinkedList = true;
                     KUtil::FindDriverByAddr(fn, &e.owner, &e.ownerOff);
                     if (e.ownerOff > 0x4000000) { e.owner = L"<unknown>"; e.ownerOff = 0; }
                     if (ctx && g_drv->IsKernelVA(ctx)) {
@@ -831,9 +834,32 @@ void CmdNotifyRegistry(const char* killDriver, DWORD64 killKva, bool killUnknown
         }
 
         if (shouldKill) {
-            g_drv->Wr64(e.slotAddr, 0);
-            printf("  %s[+] KILLED -- slot zeroed%s\n", A_GREEN, A_RESET);
-            killed++;
+            if (e.isLinkedList) {
+                // Linked list node: unlink from doubly-linked list
+                // Node layout: +0x00 Flink, +0x08 Blink
+                DWORD64 node  = e.slotAddr;
+                DWORD64 flink = g_drv->Rd64(node + 0x00);
+                DWORD64 blink = g_drv->Rd64(node + 0x08);
+
+                if (!g_drv->IsKernelVA(flink) || !g_drv->IsKernelVA(blink)) {
+                    printf("  %s[!] SKIP -- bad Flink/Blink (Flink=%p Blink=%p)%s\n",
+                           A_RED, (void*)flink, (void*)blink, A_RESET);
+                } else {
+                    // prev->Flink = next;  next->Blink = prev
+                    g_drv->Wr64(blink + 0x00, flink);
+                    g_drv->Wr64(flink + 0x08, blink);
+                    // Zero the function pointer to prevent concurrent invocation
+                    g_drv->Wr64(node + 0x28, 0);
+                    printf("  %s[+] KILLED -- unlinked from list (Flink=%p Blink=%p)%s\n",
+                           A_GREEN, (void*)flink, (void*)blink, A_RESET);
+                    killed++;
+                }
+            } else {
+                // Array slot: zero the EX_CALLBACK entry — kernel skips NULL
+                g_drv->Wr64(e.slotAddr, 0);
+                printf("  %s[+] KILLED -- slot zeroed%s\n", A_GREEN, A_RESET);
+                killed++;
+            }
         }
     }
 
