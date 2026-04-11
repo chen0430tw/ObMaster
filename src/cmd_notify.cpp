@@ -124,6 +124,37 @@ static std::vector<NotifyEntry> ScanArray(DWORD64 arrayKVA) {
         if (!fn || !g_drv->IsKernelVA(fn)) { printf(" [skip:bad fn=%p]\n", (void*)fn); continue; }
         DBG("  fn=%p\n", (void*)fn);
 
+        // Filter stale/garbage entries:
+        //   - First byte is an invalid x64 opcode (0x06 = PUSH ES, 32-bit only)
+        //   - First 8 bytes look like a LIST_ENTRY self-reference (kernel VA pointing
+        //     to itself +8), indicating a freed pool block reused as linked list node
+        {
+            BYTE firstByte = g_drv->Rd8(fn);
+            DWORD64 fnQword = g_drv->Rd64(fn);
+
+            // Invalid x64 opcodes that indicate data, not code
+            bool invalidOpcode = (firstByte == 0x06 || firstByte == 0x07 ||  // PUSH/POP ES
+                                  firstByte == 0x0E ||                        // PUSH CS
+                                  firstByte == 0x16 || firstByte == 0x17 ||  // PUSH/POP SS
+                                  firstByte == 0x1E || firstByte == 0x1F ||  // PUSH/POP DS
+                                  firstByte == 0x27 || firstByte == 0x2F ||  // DAA/DAS
+                                  firstByte == 0x37 || firstByte == 0x3F ||  // AAA/AAS
+                                  firstByte == 0x60 || firstByte == 0x61 ||  // PUSHA/POPA
+                                  firstByte == 0xD4 || firstByte == 0xD5 ||  // AAM/AAD
+                                  firstByte == 0xD6 ||                        // SALC
+                                  firstByte == 0x9A || firstByte == 0xEA);    // CALLF/JMPF
+
+            // LIST_ENTRY self-reference: first QWORD points near itself (±0x10)
+            bool selfRef = g_drv->IsKernelVA(fnQword) &&
+                           (fnQword >= fn && fnQword <= fn + 0x10);
+
+            if (invalidOpcode || selfRef) {
+                DBG("  slot[%d] fn=%p stale (byte=0x%02X selfRef=%d) -> skip\n",
+                    i, (void*)fn, firstByte, selfRef);
+                continue;
+            }
+        }
+
         NotifyEntry e{};
         e.index        = i;
         e.slotAddr     = slotAddr;
