@@ -98,6 +98,9 @@ static void Usage(const char* prog) {
     H("/bsod [path|--list|--all]",        "Analyze BSOD dump (no driver needed)");
     H("  --after td/3d/7d/YYYY-MM-DD",   "Filter: only dumps after this time");
     H("  --before yd/YYYY-MM-DD",         "Filter: only dumps before this time");
+    H("/info",                            "System info, kernel base, RTCore64 status");
+    H("/whoami",                          "Current process identity, privileges, integrity");
+    H("/acl <path|svc:name|pid:N>",       "Show owner + DACL with rwx permissions");
     printf("\n");
 
     printf("  %sPrivilege & Elevation%s\n", A_BOLD, A_RESET);
@@ -728,6 +731,18 @@ int main(int argc, char* argv[]) {
         }
         DWORD64 val = strtoull(valStr, nullptr, 16);
         SetMmPteBase(val);
+    }
+    else if (_stricmp(cmd, "info") == 0) {
+        CmdInfo();
+        return 0;
+    }
+    else if (_stricmp(cmd, "whoami") == 0) {
+        CmdWhoami();
+        return 0;
+    }
+    else if (_stricmp(cmd, "acl") == 0) {
+        CmdAcl(nextArg());
+        return 0;
     }
     else if (_stricmp(cmd, "bsod") == 0) {
         // /bsod [path.dmp | --list | --all] [--after 3d] [--before yd]

@@ -340,69 +340,14 @@ static DWORD64 FindMmPteBaseByCR3Walk() {
         if (result) return result;
     }
 
-    // ── Path B: Self-map probe via known mapped VA ────────────────────────
-    // MapPhys failed (low PA range). Instead of blind brute-force (which can
-    // BSOD by reading unmapped VAs), use ntoskrnl base as a known-good probe:
-    //
-    // ntoskrnl is always mapped. For each candidate MmPteBase, compute
-    // PteVaOf(ntoskrnl_base) and read it. If the result looks like a valid
-    // PTE (Present bit set, PA != 0), we have a PteBase candidate.
-    // Then verify by computing the PML4 self-ref entry and checking PA == CR3.
-    //
-    // This is safe: PteVaOf(ntoskrnl) for the CORRECT MmPteBase always points
-    // to a valid self-map entry. For wrong candidates, PteVaOf gives a VA
-    // inside ntoskrnl's own address range (which IS mapped), so Rd64 won't fault.
+    // ── Path B: REMOVED (caused 4x BSOD 0x50) ─────────────────────────────
+    // Both blind brute-force and ntoskrnl-probe variants read VAs that appear
+    // valid (kernel range, QWORD-aligned) but aren't actually mapped.
+    // PteVaOf(ntoskrnl) for wrong candidate MmPteBase does NOT necessarily
+    // land in mapped memory — the self-map region is sparse.
+    // Fall through to Method 0b (PhysWalk) or pattern scan + PteSafetyCheck.
     if (g_debug)
-        printf("[pte] PML4Walk: MapPhys failed for PA=0x%012llX, trying known-VA probe\n", pml4_pa);
-
-    // Get ntoskrnl base (always mapped, present, executable)
-    LPVOID drvs[1]; DWORD cbNeeded;
-    if (!EnumDeviceDrivers(drvs, sizeof(drvs), &cbNeeded) || !drvs[0]) {
-        printf("[pte] PML4Walk: cannot get ntoskrnl base\n");
-        return 0;
-    }
-    DWORD64 ntBase = (DWORD64)drvs[0];
-
-    for (int i = 256; i < 512; i++) {
-        DWORD64 cand = 0xFFFF000000000000ULL | ((DWORD64)i << 39);
-
-        // Compute PTE VA for ntoskrnl base using this candidate
-        DWORD64 pteVA = cand + ((ntBase & 0x0000FFFFFFFFF000ULL) >> 9);
-
-        // Basic sanity: must be kernel VA and QWORD-aligned
-        if (!g_drv->IsKernelVA(pteVA) || (pteVA & 7)) continue;
-
-        // Read candidate PTE — safe because pteVA for the correct candidate
-        // IS in the self-map (always valid). For wrong candidates, the VA
-        // typically falls in mapped kernel regions (won't fault), but content
-        // won't look like a valid PTE.
-        DWORD64 pteVal = g_drv->Rd64(pteVA);
-
-        // Valid PTE: Present bit set, PA field nonzero, not NX-only
-        if (!(pteVal & 1)) continue;                    // not present
-        DWORD64 pa = pteVal & 0x000FFFFFFFFFF000ULL;
-        if (!pa) continue;                               // no physical address
-
-        // Promising candidate. Now verify: walk 4 levels of self-map to reach
-        // the PML4 entry, check if its PA matches CR3 (self-reference).
-        DWORD64 lvl = pteVA;
-        for (int depth = 0; depth < 3; depth++)  // 3 more levels: PDE, PDPTE, PML4E
-            lvl = cand + ((lvl & 0x0000FFFFFFFFF000ULL) >> 9);
-
-        if (!g_drv->IsKernelVA(lvl) || (lvl & 7)) continue;
-
-        DWORD64 pml4e = g_drv->Rd64(lvl);
-        DWORD64 pml4e_pa = pml4e & 0x000FFFFFFFFFF000ULL;
-
-        if (pml4e_pa == pml4_pa && (pml4e & 1)) {
-            printf("[pte] PML4Walk(probe): verified at PML4[%d=0x%X]  CR3=0x%llX  "
-                   "MmPteBase=0x%016llX  (no MapPhys needed)\n",
-                   i, i, cr3, cand);
-            return cand;
-        }
-    }
-
-    printf("[pte] PML4Walk: both MapPhys and known-VA probe failed\n");
+        printf("[pte] PML4Walk: MapPhys failed for PA=0x%012llX — Path B disabled (4x BSOD)\n", pml4_pa);
     return 0;
 }
 
@@ -1808,8 +1753,94 @@ static DWORD64 FindMmPteBaseByRefScan(const NtoskrnlImage& img) {
     return 0;
 }
 
+// ── Method 0: PDB symbol resolution via dbghelp.dll ─────────────────────────
+// Same approach as kd.exe: SymInitialize + SymFromName("nt!MmPteBase").
+// Reads ntoskrnl PDB (from symbol cache or Microsoft symbol server),
+// resolves the symbol to an RVA, adds kernel base → kernel VA → Rd64 → value.
+// Zero speculative kernel reads. Zero BSOD risk.
+//
+// ppm-engine analysis confirmed (2026-04-11): kd.exe → dbgeng.dll → dbghelp.dll
+// → SymInitialize/SymFromAddrW (81 dbghelp imports). This is the exact same path.
+#include <DbgHelp.h>
+#pragma comment(lib, "dbghelp.lib")
+
+static DWORD64 FindMmPteBaseBySymbol() {
+    // Get ntoskrnl kernel base
+    LPVOID drvs[1]; DWORD cb;
+    if (!EnumDeviceDrivers(drvs, sizeof(drvs), &cb) || !drvs[0]) return 0;
+    DWORD64 kernBase = (DWORD64)drvs[0];
+
+    // Get ntoskrnl file path
+    WCHAR drvPath[MAX_PATH], filePath[MAX_PATH];
+    if (!GetDeviceDriverFileNameW(drvs[0], drvPath, MAX_PATH)) return 0;
+    if (_wcsnicmp(drvPath, L"\\SystemRoot\\", 12) == 0) {
+        WCHAR winDir[MAX_PATH]; GetWindowsDirectoryW(winDir, MAX_PATH);
+        swprintf_s(filePath, L"%s\\%s", winDir, drvPath + 12);
+    } else {
+        WCHAR winDir[MAX_PATH]; GetWindowsDirectoryW(winDir, MAX_PATH);
+        swprintf_s(filePath, L"%s\\System32\\ntoskrnl.exe", winDir);
+    }
+
+    // Initialize symbol handler
+    HANDLE hProc = GetCurrentProcess();
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+
+    // Use Microsoft symbol server + local cache
+    if (!SymInitializeW(hProc, L"srv*C:\\Symbols*https://msdl.microsoft.com/download/symbols", FALSE)) {
+        // Fallback: try without symbol server
+        if (!SymInitializeW(hProc, nullptr, FALSE)) {
+            if (g_debug) printf("[pte] Symbol: SymInitialize failed: %lu\n", GetLastError());
+            return 0;
+        }
+    }
+
+    // Load ntoskrnl module symbols at its kernel base address
+    DWORD64 modBase = SymLoadModuleExW(hProc, nullptr, filePath, nullptr, kernBase, 0, nullptr, 0);
+    if (!modBase) {
+        if (g_debug) printf("[pte] Symbol: SymLoadModuleEx failed: %lu\n", GetLastError());
+        SymCleanup(hProc);
+        return 0;
+    }
+
+    // Resolve MmPteBase symbol
+    BYTE symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME] = {};
+    SYMBOL_INFO* sym = (SYMBOL_INFO*)symBuf;
+    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+    sym->MaxNameLen = MAX_SYM_NAME;
+
+    DWORD64 result = 0;
+    if (SymFromName(hProc, "MmPteBase", sym)) {
+        DWORD64 varVA = sym->Address;
+        // Read the value
+        DWORD64 val = g_drv->Rd64(varVA);
+        if (g_drv->IsKernelVA(val) && (val & ((1ULL << 39) - 1)) == 0) {
+            printf("[pte] Symbol: MmPteBase @ 0x%016llX = 0x%016llX (via PDB)\n",
+                   varVA, val);
+            result = val;
+        } else if (g_debug) {
+            printf("[pte] Symbol: MmPteBase @ 0x%016llX = 0x%016llX (invalid, not 512GB-aligned)\n",
+                   varVA, val);
+        }
+    } else {
+        if (g_debug) printf("[pte] Symbol: SymFromName(MmPteBase) failed: %lu\n", GetLastError());
+    }
+
+    SymCleanup(hProc);
+    return result;
+}
+
 DWORD64 GetMmPteBase() {
     if (s_pteBase) return s_pteBase;
+
+    // ── Method 0: PDB symbol resolution (safest — no speculative reads) ────
+    // Same approach as kd.exe: dbghelp.dll SymFromName("MmPteBase").
+    {
+        DWORD64 val = FindMmPteBaseBySymbol();
+        if (val) {
+            s_pteBase = val;
+            return s_pteBase;
+        }
+    }
 
     // ── Load ntoskrnl image once for all disk-scan methods ───────────────────
     NtoskrnlImage img = LoadNtoskrnl();

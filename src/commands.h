@@ -70,3 +70,6 @@ void CmdObcbInstall(const char* sysPath);                   // /obcb-install [pa
 void CmdBsod(const char* dumpPath = nullptr,
              const char* afterSpec = nullptr,
              const char* beforeSpec = nullptr);              // /bsod [path|--list|--all] [--after 3d] [--before yd]
+void CmdInfo();                                             // /info
+void CmdWhoami();                                           // /whoami
+void CmdAcl(const char* target);                            // /acl <path|svc:name|pid:N>
