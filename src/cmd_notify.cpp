@@ -384,23 +384,43 @@ void CmdNotifyDisable(unsigned long long targetFn) {
 // Validate that a kernel VA looks like a CmpCallBackVector (EX_CALLBACK array):
 // at least one slot in [0..CM_ARRAY_MAX) must decode to a valid EX_CALLBACK_ROUTINE_BLOCK
 // with a kernel-range function pointer that does NOT fall back into the array itself.
-// Check if a byte is a valid x64 function prologue start
+// Check if a byte is a plausible x64 function prologue start.
+// This is intentionally permissive — false negatives (rejecting real callbacks)
+// are far worse than false positives (accepting non-callbacks), because a
+// false negative breaks CmCallback discovery entirely.
 static bool IsValidPrologue(BYTE b) {
-    // Common x64 function prologues:
-    //   48 (REX.W prefix for mov/sub/push)
-    //   4C (REX.WR prefix)
-    //   40-4F (any REX prefix)
-    //   55 (push rbp)
-    //   53 (push rbx)
-    //   56 (push rsi)
-    //   57 (push rdi)
-    //   41 (REX.B for push r8-r15)
-    //   CC (int3 padding before function - skip, check next byte)
-    //   E9 (jmp - thunk)
-    //   Sub rsp: starts with 48 83 EC
-    return (b >= 0x40 && b <= 0x4F) || // REX prefixes
-           b == 0x53 || b == 0x55 || b == 0x56 || b == 0x57 || // push regs
-           b == 0xE9 || b == 0x33 || b == 0x8B || b == 0x89;   // jmp/xor/mov
+    // Definite prologues:
+    //   40-4F  REX prefixes (48=REX.W, 4C=REX.WR, 41=REX.B, etc.)
+    //   53/55/56/57  push rbx/rbp/rsi/rdi
+    //   E9  jmp (thunk/trampoline)
+    //   33/8B/89  xor/mov (register setup)
+    if ((b >= 0x40 && b <= 0x4F) ||
+        b == 0x53 || b == 0x55 || b == 0x56 || b == 0x57 ||
+        b == 0xE9 || b == 0x33 || b == 0x8B || b == 0x89)
+        return true;
+    // NOP alignment: some functions start after NOP padding (e.g. 90 90 90 <real entry>).
+    // The callback pointer may land on the NOP sled before the real prologue.
+    if (b == 0x90) return true;   // NOP
+    if (b == 0xCC) return true;   // INT3 padding (breakpoint / alignment)
+    // Arithmetic/logic first instructions (rare but legal):
+    //   04 = ADD AL, imm8  (seen in ksafe CmCallback on build 19045)
+    //   0F = two-byte opcode escape (e.g. 0F 1F = NOP, 0F B6 = MOVZX)
+    //   83 = SUB/ADD/CMP r/m32, imm8 (e.g. sub esp, N)
+    //   B8-BF = MOV r32, imm32
+    //   50-5F = PUSH r32/r64
+    //   F6/F7 = TEST/NOT/NEG/MUL/DIV
+    //   FF = CALL/JMP indirect
+    if (b == 0x04 || b == 0x0F || b == 0x83 ||
+        (b >= 0x50 && b <= 0x5F) ||
+        (b >= 0xB8 && b <= 0xBF) ||
+        b == 0xF6 || b == 0xF7 || b == 0xFF ||
+        b == 0x98 || b == 0x99 ||  // CWDE/CDQ (sign-extend, seen in ksafe callbacks)
+        b == 0xC3 ||               // RET (stub/trampoline)
+        b == 0xEB ||               // JMP short
+        b == 0x65 ||               // GS: segment prefix (e.g. mov rax, gs:[...])
+        b == 0xFA || b == 0xFB)    // CLI/STI (interrupt control)
+        return true;
+    return false;
 }
 
 static bool LooksLikeCmArray(DWORD64 va)
