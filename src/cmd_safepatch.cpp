@@ -228,14 +228,12 @@ void CmdSafePatchRestore(DWORD64 addr) {
         VirtualProtect(rec->shadow_va, 4096, PAGE_EXECUTE_READWRITE, &old);
         FreePatchShadow(*rec);
     } else {
-        // Non-shadow patch record — this should not happen in normal operation.
-        // Direct Wr32 to kernel code pages will BSOD (PTE.Write=0 → 0xBE).
-        // Refuse to restore and warn the user.
-        printf("  %s[!]%s  No shadow page record — cannot restore safely.\n", A_RED, A_RESET);
-        printf("       Direct Wr32 to kernel code pages would cause BSOD 0xBE.\n");
-        printf("       The original bytes were: ");
-        for (size_t i = 0; i < rec->len; i++) printf("%02X ", rec->orig[i]);
-        printf("\n       Use /wr64 manually if target is in writable memory (data section).\n");
+        // Non-shadow patch record — should never happen.
+        // /safepatch refuses to create records without shadow pages.
+        // If we get here, something is seriously wrong.
+        printf("  %s[!]%s  No shadow page record — internal error.\n", A_RED, A_RESET);
+        printf("       This patch was not created through the normal safepatch path.\n");
+        printf("       Cannot restore safely (kernel code pages are read-only).\n");
         return;
     }
 
