@@ -300,15 +300,27 @@ static bool HasActiveCallbacks(const char* svcName) {
     printf("%s[!] WARNING: %s is a protection driver with active kernel callbacks.%s\n\n",
            A_RED, svcName, A_RESET);
     printf("    Directly unloading it will BSOD (CmCallback blocks SCM registry access).\n\n");
-    printf("    You MUST tear down callbacks first, in this order:\n\n");
-    printf("      1. /notify registry --kill %s     (kill CmCallback — unlock SCM)\n", svcName);
-    printf("      2. /obcb → /disable <addr>        (kill ObCallback — unlock handles)\n");
-    printf("      3. /notify image → /ndisable <addr> (kill ImageNotify)\n");
-    printf("      4. /flt-detach %s C:               (detach MiniFilter)\n", svcName);
-    printf("      5. THEN /force-stop %s             (safe to unload)\n\n", svcName);
-    printf("    See docs/ksafe_architecture.md for the full 19-step unload sequence.\n\n");
-    printf("    %sAborting. Use /force-stop %s --force to override (BSOD risk).%s\n\n",
-           A_YELLOW, svcName, A_RESET);
+    printf("    === Phase 1: Disarm callbacks (ALL drivers, in this order) ===\n\n");
+    printf("      1.  /notify registry --kill ksafecenter64    (CmCallback)\n");
+    printf("      2.  /notify registry --kill kboot64          (CmCallback)\n");
+    printf("      3.  /obcb  ->  /disable <ksafe_PreOp_addr>  (ObCallback)\n");
+    printf("      4.  /notify image  ->  /ndisable <addr>      (ksafe ImageNotify)\n");
+    printf("      5.  /notify process -> /ndisable <addr>      (kshutdown ProcessNotify)\n");
+    printf("      6.  /notify image  ->  /ndisable <addr>      (kshutdown ImageNotify)\n");
+    printf("      7.  /notify process -> /ndisable <addr>      (kboot ProcessNotify)\n");
+    printf("      8.  /notify image  ->  /ndisable <addr>      (kboot ImageNotify)\n");
+    printf("      9.  /notify process -> /ndisable <addr>      (kcachec ProcessNotify)\n");
+    printf("      10. /flt-detach ksafecenter64 C:             (MiniFilter)\n\n");
+    printf("    === Phase 2: Unload protection drivers ===\n\n");
+    printf("      11. /force-stop ksafecenter64 --force\n");
+    printf("      12. /force-stop kshutdown64 --force\n");
+    printf("      13. /force-stop kboot64 --force\n");
+    printf("      14. /force-stop kcachec64 --force\n\n");
+    printf("    === Phase 3: Non-protection drivers (safe to unload directly) ===\n\n");
+    printf("      15-19. /force-stop krestore64 / KScsiDisk64 / kdisk64 / kantiarp64 / kpowershutdown64\n\n");
+    printf("    See docs/ksafe_architecture.md for details.\n\n");
+    printf("    %sAborting. Use --force to skip this check (BSOD risk).%s\n\n",
+           A_YELLOW, A_RESET);
     return true;
 }
 
