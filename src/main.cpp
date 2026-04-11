@@ -91,7 +91,8 @@ static void Usage(const char* prog) {
     H("/pte <addr> [flags]",              "Walk 4-level page table; --set-write --clear-nx --restore");
     H("/rd64 <addr> [n]",                 "Read QWORDs from kernel VA");
     H("/wr64 <addr> <value>",             "Write QWORD to kernel VA");
-    H("/ptebase  /ptebase-set <val>",     "MmPteBase discovery / manual override");
+    H("/ptebase [--method N]",             "MmPteBase discovery (N=1-12 for specific method)");
+    H("/ptebase-set <val>",                "Manual MmPteBase override");
     printf("\n");
 
     printf("  %sDiagnostics%s\n", A_BOLD, A_RESET);
@@ -721,7 +722,14 @@ int main(int argc, char* argv[]) {
     }
     else if (_stricmp(cmd, "ptebase") == 0) {
         KUtil::BuildDriverCache();
-        CmdPteBaseScan();
+        // /ptebase --method N  → run only method N (1-12)
+        int methodFilter = -1;
+        const char* mArg = nextArg();
+        if (mArg && (_stricmp(mArg, "--method") == 0 || _stricmp(mArg, "-m") == 0)) {
+            const char* mNum = nextArg(1);  // skip "--method" (nextArg is skip-based)
+            if (mNum) methodFilter = atoi(mNum);
+        }
+        CmdPteBaseScan(methodFilter);
     }
     else if (_stricmp(cmd, "ptebase-set") == 0) {
         const char* valStr = nextArg();

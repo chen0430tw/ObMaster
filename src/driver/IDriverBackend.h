@@ -68,6 +68,12 @@ public:
     // Returns 0 on failure.  Call UnmapPhys when done.
     virtual DWORD64 MapPhys  (DWORD64 pa, DWORD size) { (void)pa; (void)size; return 0; }
     virtual void    UnmapPhys(DWORD64 va, DWORD size) { (void)va; (void)size; }
+
+    // Physical memory mapping via \Device\PhysicalMemory (ZwMapViewOfSection).
+    // Unlike MapPhys (MmMapIoSpace), this CAN map RAM pages at any PA.
+    // Returns a kernel VA, or 0 on failure.  Call UnmapPhysSection when done.
+    virtual DWORD64 MapPhysSection  (DWORD64 pa, DWORD size) { (void)pa; (void)size; return 0; }
+    virtual void    UnmapPhysSection(DWORD64 va) { (void)va; }
 };
 
 // Global backend pointer — set in main before any operation

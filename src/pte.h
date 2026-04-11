@@ -36,7 +36,8 @@ void SetMmPteBase(DWORD64 val);
 
 // Run the reference-count scan and print all top-N candidates + their runtime values.
 // Does NOT update the cache — diagnostic only.
-void CmdPteBaseScan();
+// If methodFilter >= 0, only run that specific method (1-12). -1 = run all.
+void CmdPteBaseScan(int methodFilter = -1);
 
 // Kernel VA of the PTE that describes 'va' (works for any VA: user or kernel)
 // Returns 0 if MmPteBase unavailable

