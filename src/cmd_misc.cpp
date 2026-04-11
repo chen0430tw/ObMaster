@@ -16,6 +16,7 @@
 #include "globals.h"
 #include "ansi.h"
 #include "kutil.h"
+#include "pte.h"
 
 // ── /info ────────────────────────────────────────────────────────────────────
 void CmdInfo() {
@@ -519,4 +520,118 @@ void CmdAcl(const char* target) {
     PrintAcl(pDacl, "DACL");
     if (pSD) LocalFree(pSD);
     printf("\n");
+}
+
+// ─── /v2p <va> — Virtual Address → Physical Address ─────────────────────────
+void CmdV2P(DWORD64 va) {
+    if (!va) { printf("[!] Usage: /v2p <hex_va>\n"); return; }
+
+    // Identify driver
+    KUtil::BuildDriverCache();
+    const wchar_t* drvName = nullptr; DWORD64 drvOff = 0;
+    KUtil::FindDriverByAddr(va, &drvName, &drvOff);
+
+    // Check large page
+    bool largePage = IsLargePage(va);
+
+    if (largePage) {
+        // Large page: read PDE directly for PA
+        DWORD64 base = GetMmPteBase();
+        if (!base) { printf("[!] MmPteBase unavailable\n"); return; }
+        DWORD64 pteVA = PteVaOf(va);
+        DWORD64 pdeVA = base + ((pteVA & 0x0000FFFFFFFFF000ULL) >> 9);
+        DWORD64 pde = g_drv->Rd64(pdeVA);
+        // Large page PA: PDE PA field (bits 47:21) + VA offset (bits 20:0)
+        DWORD64 pa = (pde & 0x000FFFFFFFE00000ULL) | (va & 0x1FFFFF);
+        printf("  VA: 0x%016llX  →  PA: 0x%012llX  (2MB large page)\n", va, pa);
+        if (drvName) printf("  %ls +0x%llX\n", drvName, drvOff);
+    } else {
+        PteInfo pte = ReadPte(va);
+        if (!pte.valid) { printf("[!] PTE walk failed\n"); return; }
+        if (!pte.present) { printf("[!] Page not present (paged out)\n"); return; }
+        DWORD64 pa = pte.page_pa | (va & 0xFFF);
+        printf("  VA: 0x%016llX  →  PA: 0x%012llX  (4KB page)\n", va, pa);
+        if (drvName) printf("  %ls +0x%llX\n", drvName, drvOff);
+    }
+}
+
+// ─── /p2v <pa> — Physical Address → Virtual Address (reverse lookup) ────────
+void CmdP2V(DWORD64 pa) {
+    if (!pa) { printf("[!] Usage: /p2v <hex_pa>\n"); return; }
+
+    printf("[*] Searching for PA 0x%012llX in loaded drivers...\n\n", pa);
+
+    DWORD64 targetPage = pa & ~0xFFFULL;
+    DWORD64 targetLargePage = pa & ~0x1FFFFFULL;
+
+    // Scan all loaded drivers
+    LPVOID devs[1024]; DWORD cb;
+    if (!EnumDeviceDrivers(devs, sizeof(devs), &cb)) {
+        printf("[!] EnumDeviceDrivers failed\n"); return;
+    }
+    DWORD numDrv = cb / sizeof(LPVOID);
+
+    KUtil::BuildDriverCache();
+    int found = 0;
+
+    for (DWORD i = 0; i < numDrv; i++) {
+        DWORD64 base = (DWORD64)devs[i];
+        if (!g_drv->IsKernelVA(base)) continue;
+
+        // Get driver size from PE header
+        WORD magic = (WORD)g_drv->ReadPrim(base, 2);
+        if (magic != 0x5A4D) continue;  // MZ
+        DWORD e_lfanew = g_drv->Rd32(base + 0x3C);
+        if (e_lfanew > 0x400) continue;
+        DWORD sizeOfImage = g_drv->Rd32(base + e_lfanew + 0x50);
+        if (!sizeOfImage || sizeOfImage > 0x10000000) continue;
+
+        // Sample pages: check first page, then every 0x10000 (64KB)
+        for (DWORD64 off = 0; off < sizeOfImage; off += 0x1000) {
+            DWORD64 va = base + off;
+            bool isLarge = IsLargePage(va);
+
+            if (isLarge) {
+                // Large page: compute PA from PDE
+                DWORD64 pteBase = GetMmPteBase();
+                if (!pteBase) continue;
+                DWORD64 pteVA = PteVaOf(va);
+                DWORD64 pdeVA = pteBase + ((pteVA & 0x0000FFFFFFFFF000ULL) >> 9);
+                DWORD64 pde = g_drv->Rd64(pdeVA);
+                if (!(pde & 1)) continue;
+                DWORD64 pagePA = pde & 0x000FFFFFFFE00000ULL;
+                if (pagePA == targetLargePage) {
+                    DWORD64 matchVA = va | (pa & 0x1FFFFF);
+                    const wchar_t* name = nullptr; DWORD64 doff = 0;
+                    KUtil::FindDriverByAddr(matchVA, &name, &doff);
+                    printf("  PA 0x%012llX  →  VA 0x%016llX  %ls +0x%llX  (2MB large page)\n",
+                           pa, matchVA, name ? name : L"???", doff);
+                    found++;
+                    off += 0x200000 - 0x1000;  // skip rest of large page
+                }
+            } else {
+                PteInfo pte = ReadPte(va);
+                if (!pte.valid || !pte.present) continue;
+                if (pte.page_pa == targetPage) {
+                    DWORD64 matchVA = va | (pa & 0xFFF);
+                    const wchar_t* name = nullptr; DWORD64 doff = 0;
+                    KUtil::FindDriverByAddr(matchVA, &name, &doff);
+                    printf("  PA 0x%012llX  →  VA 0x%016llX  %ls +0x%llX  (4KB page)\n",
+                           pa, matchVA, name ? name : L"???", doff);
+                    found++;
+                }
+            }
+
+            // Skip large ranges after first page to speed up scan
+            if (off == 0 && sizeOfImage > 0x100000) {
+                // Check if first page is large — if so, jump by 2MB
+                if (isLarge) off += 0x200000 - 0x1000;
+            }
+        }
+    }
+
+    if (!found)
+        printf("  (not found in any loaded driver)\n");
+    else
+        printf("\n  %d match(es)\n", found);
 }

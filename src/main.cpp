@@ -49,6 +49,10 @@ static void Usage(const char* prog) {
     H("/dll-list <name>",                 "Find processes with <name> DLL loaded");
     H("/inj-scan [pid]",                  "Injection artifact scan (reflective, shellcode, orphan thread)");
     H("/epdump <pid>",                    "Raw EPROCESS field dump");
+    H("/proc-token <pid>",               "Dump process token details");
+    H("/info",                            "System info, kernel base, RTCore64 status");
+    H("/whoami",                          "Current process identity, privileges, integrity");
+    H("/acl <path|svc:name|pid:N>",       "Show owner + DACL with rwx permissions");
     printf("\n");
 
     printf("  %sCallbacks & Notify%s\n", A_BOLD, A_RESET);
@@ -66,7 +70,6 @@ static void Usage(const char* prog) {
     H("/handle-close <pid> <handle>",     "Close a handle (kernel walk for pid=4)");
     H("/handle-scan <pid> [opts]",        "Kernel HANDLE_TABLE scan (--access --target-pid --close --spin)");
     H("/timedelta <pid> [ms]",            "Monitor transient System handles (race window)");
-    H("/proc-token <pid>",               "Dump process token details");
     printf("\n");
 
     printf("  %sDrivers & Minifilters%s\n", A_BOLD, A_RESET);
@@ -86,22 +89,22 @@ static void Usage(const char* prog) {
     H("/watchfix <proc> <t1> [t2] ...",   "Auto-restore on new process launch (continuous)");
     H("/safepatch <addr> <hex>",          "Shadow-page PTE swap (safe kernel patch)");
     H("/restore <addr>",                  "Undo a safepatch");
+    H("/sp-test <addr>",                  "Safepatch diagnostic (HVCI/PTE read/write/shadow test)");
     H("/guard-add/start/stop/list",       "Watchdog: re-apply safepatch if reverted");
     H("/patch <addr> <hex>",              "Raw byte write (legacy, unsafe)");
     H("/pte <addr> [flags]",              "Walk 4-level page table; --set-write --clear-nx --restore");
+    H("/v2p <va>",                        "Virtual address → physical address");
+    H("/p2v <pa>",                        "Physical address → virtual address (driver scan)");
     H("/rd64 <addr> [n]",                 "Read QWORDs from kernel VA");
     H("/wr64 <addr> <value>",             "Write QWORD to kernel VA");
-    H("/ptebase [--method N]",             "MmPteBase discovery (N=1-12 for specific method)");
-    H("/ptebase-set <val>",                "Manual MmPteBase override");
+    H("/ptebase [--method N]",            "MmPteBase discovery (N=1-12 for specific method)");
+    H("/ptebase-set <val>",               "Manual MmPteBase override");
     printf("\n");
 
     printf("  %sDiagnostics%s\n", A_BOLD, A_RESET);
     H("/bsod [path|--list|--all]",        "Analyze BSOD dump (no driver needed)");
     H("  --after td/3d/7d/YYYY-MM-DD",   "Filter: only dumps after this time");
     H("  --before yd/YYYY-MM-DD",         "Filter: only dumps before this time");
-    H("/info",                            "System info, kernel base, RTCore64 status");
-    H("/whoami",                          "Current process identity, privileges, integrity");
-    H("/acl <path|svc:name|pid:N>",       "Show owner + DACL with rwx permissions");
     printf("\n");
 
     printf("  %sPrivilege & Elevation%s\n", A_BOLD, A_RESET);
@@ -719,6 +722,18 @@ int main(int argc, char* argv[]) {
         bool atomic = g_drv->Wr64Atomic(addr, val);
         printf("[+] Wr64 0x%016llX <- 0x%016llX  (%s)\n",
                addr, val, atomic ? "ATOMIC 8B" : "hi-lo fallback");
+    }
+    else if (_stricmp(cmd, "v2p") == 0) {
+        const char* addrStr = nextArg();
+        if (!addrStr) { printf("[!] Usage: /v2p <hex_va>\n"); g_drv->Close(); return 1; }
+        DWORD64 va = strtoull(addrStr, nullptr, 16);
+        CmdV2P(va);
+    }
+    else if (_stricmp(cmd, "p2v") == 0) {
+        const char* addrStr = nextArg();
+        if (!addrStr) { printf("[!] Usage: /p2v <hex_pa>\n"); g_drv->Close(); return 1; }
+        DWORD64 pa = strtoull(addrStr, nullptr, 16);
+        CmdP2V(pa);
     }
     else if (_stricmp(cmd, "ptebase") == 0) {
         KUtil::BuildDriverCache();

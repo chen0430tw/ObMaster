@@ -30,6 +30,9 @@ Process inspection, PPL bypass, two-stage UAC bypass (COM + kernel token steal),
 | `/drivers` | List loaded kernel modules with base address and SCM state |
 | `/services [all]` | List services (default: running only) |
 | `/net` | TCP/UDP connections (IPv4 + IPv6) with owning process name |
+| `/info` | System info, kernel base address, RTCore64 status |
+| `/whoami` | Current process identity, SID, integrity level, all privileges |
+| `/acl <path\|svc:name\|pid:N>` | Owner + DACL with rwx permissions; PID 4 uses kernel path to bypass PPL |
 
 ### ObCallbacks
 | Command | Description |
@@ -43,6 +46,7 @@ Process inspection, PPL bypass, two-stage UAC bypass (COM + kernel token steal),
 | Command | Description |
 |---|---|
 | `/notify [image\|process\|thread]` | Enumerate `Ps*NotifyRoutine` arrays (LoadImage / CreateProcess / CreateThread) |
+| `/notify registry [--kill <drv>]` | Enumerate `CmRegisterCallback` routines; `--kill` zeroes the callback to unregister |
 | `/ndisable <fn_addr>` | Zero the `EX_CALLBACK` slot for the matching entry — **⚠ BSOD risk, see below** |
 
 > **⚠ BSOD warning — `/ndisable`:** Zeroing a notify slot while the kernel or another driver holds a rundown reference to that `EX_CALLBACK_ROUTINE_BLOCK` can cause an immediate bugcheck. Always enumerate first with `/notify`, identify the target, then disable during a quiet window (no active callbacks in flight). Never use on `ntoskrnl.exe` or `WdFilter.sys` entries.
@@ -106,8 +110,10 @@ Process inspection, PPL bypass, two-stage UAC bypass (COM + kernel token steal),
 | `/pte <addr> [--set-write] [--clear-nx] [--restore <val>]` | Walk 4-level page tables and display leaf PTE; optionally modify W/NX flags. **PteSafetyCheck** runs before any write: validates MmPteBase, rejects 2MB large pages, warns on DKOM drivers |
 | `/safepatch <addr> <hex>` | Patch kernel read-only code pages via shadow-page PTE swap; TLB flushed with `FlushTlb()`. **PteSafetyCheck** blocks if MmPteBase is contaminated or target is on a large page |
 | `/restore <addr>` | Undo a `/safepatch`, restore original PTE mapping |
-| `/sp-test <addr>` | Four-stage safepatch diagnostic: Stage 0 HVCI check, Stage 1 PTE read, Stage 2 PTE write, Stage 3 shadow swap + verify |
-| `/ptebase` | Run all `MmPteBase` discovery methods with full diagnostics |
+| `/sp-test <addr>` | Safepatch diagnostic: Stage 0 HVCI check, Stage 1 PTE read + large page detect, Stage 2 PTE write, Stage 3 shadow swap + verify |
+| `/v2p <va>` | Translate virtual address → physical address (supports 4KB and 2MB large pages) |
+| `/p2v <pa>` | Reverse lookup: physical address → virtual address (scans all loaded drivers) |
+| `/ptebase [--method N]` | Run all 12 MmPteBase discovery methods; `--method N` runs only method N |
 | `/ptebase-set <val>` | Manually override the cached `MmPteBase` value |
 | `/rd64 <addr> [count]` | Raw kernel QWORD read |
 | `/wr64 <addr> <val>` | Raw kernel QWORD write |
@@ -274,7 +280,7 @@ ObMaster
 │   ├── cmd_handle_close.cpp       /handle-close + /handle-scan
 │   ├── cmd_epdump.cpp             /epdump
 │   ├── cmd_drvzombie.cpp          /drv-zombie
-│   ├── pte.cpp                    MmPteBase discovery (10 methods) + PTE R/W + FlushTlb
+│   ├── pte.cpp                    MmPteBase discovery (12 methods) + PTE R/W + FlushTlb
 │   ├── patch_store.cpp            safepatch slot store
 │   ├── cmd_pte.cpp                /pte + /ptebase*
 │   ├── cmd_safepatch.cpp          /safepatch + /restore
@@ -283,6 +289,7 @@ ObMaster
 │   ├── cmd_timedelta.cpp          /timedelta
 │   ├── cmd_winlogon.cpp           /wlmon + /wlinject + /wluninject + /wluninject-all + /wnd + /wnd-close + /wl-sas + /wl-persist + /wl-unpersist + /dll-list + /inj-scan + /kill-ppl + /make-ppl
 │   ├── cmd_bsod.cpp               /bsod (dump analysis + time filter)
+│   ├── cmd_misc.cpp               /info + /whoami + /acl + /v2p + /p2v
 │   └── main.cpp
 ├── build/
 │   ├── build.bat                  Main build script

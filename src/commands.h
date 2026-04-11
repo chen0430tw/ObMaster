@@ -73,3 +73,5 @@ void CmdBsod(const char* dumpPath = nullptr,
 void CmdInfo();                                             // /info
 void CmdWhoami();                                           // /whoami
 void CmdAcl(const char* target);                            // /acl <path|svc:name|pid:N>
+void CmdV2P(DWORD64 va);                                    // /v2p <va>
+void CmdP2V(DWORD64 pa);                                    // /p2v <pa>
