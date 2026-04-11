@@ -796,12 +796,14 @@ int main(int argc, char* argv[]) {
     else if (_stricmp(cmd, "force-stop") == 0) {
         const char* name = nextArg(0);
         if (!name) {
-            printf("[!] Usage: /force-stop <service_name>\n");
+            printf("[!] Usage: /force-stop <service_name> [--force]\n");
             printf("    Calls NtUnloadDriver directly, bypassing SCM error 1052\n");
-            printf("    If driver has no DriverUnload, use /drv-unload <name> <va> instead\n");
+            printf("    --force skips callback safety check (BSOD risk!)\n");
             g_drv->Close(); return 1;
         }
-        CmdForceStop(name);
+        const char* arg2 = nextArg(1);
+        bool force = arg2 && (_stricmp(arg2, "--force") == 0);
+        CmdForceStop(name, force);
     }
     else if (_stricmp(cmd, "elevate-pid") == 0) {
         const char* pidStr = nextArg(0);

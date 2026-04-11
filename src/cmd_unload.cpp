@@ -278,8 +278,45 @@ static bool EnablePrivilege(const wchar_t* privName) {
     return ok;
 }
 
-void CmdForceStop(const char* svcName) {
+// Check if a driver has active callbacks that must be torn down before unloading.
+// Returns true if callbacks detected (caller should warn/abort).
+static bool HasActiveCallbacks(const char* svcName) {
+    // Known protection drivers with callbacks that cause BSOD if unloaded directly.
+    // The correct order is: CmCallback → ObCallback → Notify → MiniFilter → THEN unload.
+    // See docs/ksafe_architecture.md "多驱动拆除顺序" for full sequence.
+    static const char* kProtectedDrivers[] = {
+        "ksafecenter64", "kboot64", "kshutdown64", "kcachec64", nullptr
+    };
+
+    bool isProtected = false;
+    for (int i = 0; kProtectedDrivers[i]; i++) {
+        if (_stricmp(svcName, kProtectedDrivers[i]) == 0) {
+            isProtected = true;
+            break;
+        }
+    }
+    if (!isProtected) return false;
+
+    printf("%s[!] WARNING: %s is a protection driver with active kernel callbacks.%s\n\n",
+           A_RED, svcName, A_RESET);
+    printf("    Directly unloading it will BSOD (CmCallback blocks SCM registry access).\n\n");
+    printf("    You MUST tear down callbacks first, in this order:\n\n");
+    printf("      1. /notify registry --kill %s     (kill CmCallback — unlock SCM)\n", svcName);
+    printf("      2. /obcb → /disable <addr>        (kill ObCallback — unlock handles)\n");
+    printf("      3. /notify image → /ndisable <addr> (kill ImageNotify)\n");
+    printf("      4. /flt-detach %s C:               (detach MiniFilter)\n", svcName);
+    printf("      5. THEN /force-stop %s             (safe to unload)\n\n", svcName);
+    printf("    See docs/ksafe_architecture.md for the full 19-step unload sequence.\n\n");
+    printf("    %sAborting. Use /force-stop %s --force to override (BSOD risk).%s\n\n",
+           A_YELLOW, svcName, A_RESET);
+    return true;
+}
+
+void CmdForceStop(const char* svcName, bool force) {
     printf("[*] /force-stop  service=%s\n\n", svcName);
+
+    // Safety check: refuse to directly unload known protection drivers
+    if (!force && HasActiveCallbacks(svcName)) return;
 
     // Try user-mode privilege enable first; fall back to kernel patch via /enable-priv
     if (EnablePrivilege(L"SeLoadDriverPrivilege"))
