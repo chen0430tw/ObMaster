@@ -2495,26 +2495,57 @@ bool ValidateMmPteBase() {
     }
     DWORD64 ntBase = (DWORD64)d[0];
 
-    PteInfo pte = ReadPte(ntBase);
-    if (!pte.valid) {
-        printf("%s[!]%s ValidateMmPteBase: ReadPte(ntoskrnl=0x%llX) failed — MmPteBase CONTAMINATED\n",
-               A_RED, A_RESET, ntBase);
-        return false;
+    // ntoskrnl base (PE header) may be non-executable on large pages.
+    // Use a VA inside .text for validation — .text is always executable.
+    // .text RVA is typically 0x200000 on Win10 19041 ntoskrnl, but we
+    // can just offset +0x1000 from base as a safe interior point.
+    // Better: use MiGetPteAddress itself (always in .text, always mapped).
+    DWORD64 validateVA = ntBase;
+    {
+        DWORD64 mig = KUtil::KernelExport("MiGetPteAddress");
+        if (mig && mig > ntBase) validateVA = mig;
+        else validateVA = ntBase + 0x200000;  // typical .text RVA
     }
-    if (!pte.present) {
-        printf("%s[!]%s ValidateMmPteBase: ntoskrnl PTE not Present — MmPteBase CONTAMINATED\n",
-               A_RED, A_RESET);
-        return false;
-    }
-    if (!pte.executable) {
-        printf("%s[!]%s ValidateMmPteBase: ntoskrnl PTE not Executable — MmPteBase CONTAMINATED\n",
-               A_RED, A_RESET);
-        return false;
+
+    // ntoskrnl .text may be on a 2MB large page (PDE.PS=1) — no PTE layer.
+    if (IsLargePage(validateVA)) {
+        // Large page: read PDE directly and check Present only.
+        // NX may vary per 2MB region (PE header = NX, .text = exec).
+        DWORD64 pteVA = PteVaOf(validateVA);
+        DWORD64 pdeVA = base + ((pteVA & 0x0000FFFFFFFFF000ULL) >> 9);
+        DWORD64 pde = g_drv->Rd64(pdeVA);
+        bool present = (pde & 1) != 0;
+        if (!present) {
+            printf("%s[!]%s ValidateMmPteBase: ntoskrnl PDE not Present — MmPteBase CONTAMINATED\n",
+                   A_RED, A_RESET);
+            return false;
+        }
+        if (g_debug)
+            printf("[pte] ValidateMmPteBase: ntoskrnl on large page, PDE=0x%016llX (Present) OK\n", pde);
+    } else {
+        PteInfo pte = ReadPte(ntBase);
+        if (!pte.valid) {
+            printf("%s[!]%s ValidateMmPteBase: ReadPte(ntoskrnl=0x%llX) failed — MmPteBase CONTAMINATED\n",
+                   A_RED, A_RESET, ntBase);
+            return false;
+        }
+        if (!pte.present) {
+            printf("%s[!]%s ValidateMmPteBase: ntoskrnl PTE not Present — MmPteBase CONTAMINATED\n",
+                   A_RED, A_RESET);
+            return false;
+        }
+        if (!pte.executable) {
+            printf("%s[!]%s ValidateMmPteBase: ntoskrnl PTE not Executable — MmPteBase CONTAMINATED\n",
+                   A_RED, A_RESET);
+            return false;
+        }
     }
 
     // Cross-check: also verify PTE of PsInitialSystemProcess (EPROCESS, always present)
+    // Skip if EPROCESS is on a large page (ReadPte returns PDE, not PTE —
+    // validation would fail even with correct MmPteBase).
     DWORD64 sysEP = g_drv->Rd64(KUtil::KernelExport("PsInitialSystemProcess"));
-    if (g_drv->IsKernelVA(sysEP)) {
+    if (g_drv->IsKernelVA(sysEP) && !IsLargePage(sysEP)) {
         PteInfo sysPte = ReadPte(sysEP);
         if (!sysPte.valid || !sysPte.present) {
             printf("%s[!]%s ValidateMmPteBase: System EPROCESS PTE invalid — MmPteBase CONTAMINATED\n",
@@ -2524,8 +2555,7 @@ bool ValidateMmPteBase() {
     }
 
     if (g_debug)
-        printf("[pte] ValidateMmPteBase: OK (ntoskrnl PTE=0x%016llX, P=%d X=%d)\n",
-               pte.pte_val, pte.present, pte.executable);
+        printf("[pte] ValidateMmPteBase: OK\n");
     return true;
 }
 
