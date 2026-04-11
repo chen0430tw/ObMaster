@@ -293,10 +293,35 @@ ObMaster /ptebase-set FFFFC18000000000
 ObMaster /pte <ntoskrnl_base>
 ```
 
+### kd.exe 版本
+
+系统上存在两个版本：
+
+| | Windows SDK 版 | Microsoft Store 版 (WinDbg Preview) |
+|--|---------------|-------------------------------------|
+| 路径 | `C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\kd.exe` | `C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2601.12001.0_x64__8wekyb3d8bbwe\amd64\kd.exe` |
+| 版本 | 10.0.26100.2454 | 1.2601.12001.0 |
+| 来源 | Windows SDK 安装 | Microsoft Store 自动更新 |
+| 调试引擎 | 相同 (dbgeng.dll) | 相同 |
+| 推荐 | 使用这个（权限无限制） | WindowsApps 目录权限受限 |
+
+### 实测记录 (2026-04-11)
+
+```bash
+sudo "C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/kd.exe" -kl -c "dq nt!MmPteBase L1; q"
+# fffff805`7d8fb358  ffffdf80`00000000
+```
+
+**MmPteBase = 0xFFFFDF8000000000**，PML4 self-ref index = 447 (0x1BF)
+
+同一 session 中 ObMaster 的 10 种扫描方法全部失败（DKOM 干扰 + MapPhys 低地址限制），
+kd.exe 通过 PDB 符号直接定位成功。用 `/ptebase-set` 注入后 PTE 操作正常。
+
 ### 注意事项
 - kd.exe 读到的值是**当前开机的实时值**，每次重启后 KASLR 会变
 - 蓝屏重启后必须重新读取，之前的值无效
 - ObMaster 的自动扫描（12 种方法）可能受 DKOM 干扰，kd.exe 是最终仲裁
+- Store 版 kd.exe 在 WindowsApps 目录下，Claude Code 的 Bash 工具因权限问题无法直接调用，使用 SDK 版
 - `-kl` 是 local kernel debug，只读不写，不会修改内核状态
 
 三种方法的核心都是 **dbghelp.dll 符号解析**，区别仅在于内核内存的读取方式。
