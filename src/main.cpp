@@ -92,7 +92,12 @@ static void Usage(const char* prog) {
     H("/rd64 <addr> [n]",                 "Read QWORDs from kernel VA");
     H("/wr64 <addr> <value>",             "Write QWORD to kernel VA");
     H("/ptebase  /ptebase-set <val>",     "MmPteBase discovery / manual override");
-    H("/bsod [path|--list|--all]",        "Analyze BSOD dump (--after 3d --before yd)");
+    printf("\n");
+
+    printf("  %sDiagnostics%s\n", A_BOLD, A_RESET);
+    H("/bsod [path|--list|--all]",        "Analyze BSOD dump (no driver needed)");
+    H("  --after td/3d/7d/YYYY-MM-DD",   "Filter: only dumps after this time");
+    H("  --before yd/YYYY-MM-DD",         "Filter: only dumps before this time");
     printf("\n");
 
     printf("  %sPrivilege & Elevation%s\n", A_BOLD, A_RESET);

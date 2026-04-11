@@ -103,14 +103,29 @@ Process inspection, PPL bypass, two-stage UAC bypass (COM + kernel token steal),
 ### PTE / Memory
 | Command | Description |
 |---|---|
-| `/pte <addr> [--set-write] [--clear-nx] [--restore <val>]` | Walk 4-level page tables and display leaf PTE; optionally modify W/NX flags |
-| `/safepatch <addr> <hex>` | Patch kernel read-only code pages via shadow-page PTE swap; TLB flushed with `FlushTlb()` (MapPhys + WRITE IOCTL + UnmapPhys — no `~PTE_GLOBAL` or timing hacks) |
+| `/pte <addr> [--set-write] [--clear-nx] [--restore <val>]` | Walk 4-level page tables and display leaf PTE; optionally modify W/NX flags. **PteSafetyCheck** runs before any write: validates MmPteBase, rejects 2MB large pages, warns on DKOM drivers |
+| `/safepatch <addr> <hex>` | Patch kernel read-only code pages via shadow-page PTE swap; TLB flushed with `FlushTlb()`. **PteSafetyCheck** blocks if MmPteBase is contaminated or target is on a large page |
 | `/restore <addr>` | Undo a `/safepatch`, restore original PTE mapping |
 | `/sp-test <addr>` | Four-stage safepatch diagnostic: Stage 0 HVCI check, Stage 1 PTE read, Stage 2 PTE write, Stage 3 shadow swap + verify |
 | `/ptebase` | Run all `MmPteBase` discovery methods with full diagnostics |
 | `/ptebase-set <val>` | Manually override the cached `MmPteBase` value |
 | `/rd64 <addr> [count]` | Raw kernel QWORD read |
 | `/wr64 <addr> <val>` | Raw kernel QWORD write |
+
+### BSOD Diagnosis
+| Command | Description |
+|---|---|
+| `/bsod` | Analyze latest dump file -- BugCheck code, parameters, faulting driver, diagnosis |
+| `/bsod <path.dmp>` | Analyze a specific dump file |
+| `/bsod --list` | One-line summary of all dumps with BugCheck code |
+| `/bsod --all` | Analyze every dump inline |
+| `/bsod --after 3d` | Filter: only dumps from last 3 days |
+| `/bsod --before 2026-04-10` | Filter: only dumps before date |
+| `/bsod --list --after td` | Today's dumps only |
+
+Time filter shortcuts (same as doc_searcher.py): `td` (today), `yd` (yesterday), `Nd` (N days ago), `Nh` (N hours ago), `tw` (this week), `lw` (last week), `tm` (this month), `@timestamp`, `YYYY-MM-DD`
+
+> `/bsod` does **not** require RTCore64 -- it reads dump files directly. No admin needed unless dumps are in a protected directory.
 
 ### Guard Watchdog
 | Command | Description |
@@ -267,6 +282,7 @@ ObMaster
 │   ├── cmd_guard.cpp              /guard-*
 │   ├── cmd_timedelta.cpp          /timedelta
 │   ├── cmd_winlogon.cpp           /wlmon + /wlinject + /wluninject + /wluninject-all + /wnd + /wnd-close + /wl-sas + /wl-persist + /wl-unpersist + /dll-list + /inj-scan + /kill-ppl + /make-ppl
+│   ├── cmd_bsod.cpp               /bsod (dump analysis + time filter)
 │   └── main.cpp
 ├── build/
 │   ├── build.bat                  Main build script
@@ -392,6 +408,27 @@ The three notify arrays (`PspLoadImageNotifyRoutine`, `PspCreateProcessNotifyRou
 `PsSetCreateProcessNotifyRoutineEx`'s first in-`.data` LEA hits `PspLoadImageNotifyRoutine`; the scanner skips it via `skipVA` and falls back to `PsSetCreateProcessNotifyRoutine`.
 
 Each array entry is an `EX_CALLBACK` (`EX_FAST_REF`). Decoding: `block = value & ~0xF`. The actual callback is at `block + 0x08` (`EX_CALLBACK_ROUTINE_BLOCK.Function`). `/ndisable` zeroes the array slot; the kernel skips NULL entries on iteration.
+
+### PTE safety checks
+
+`/pte --set-write`, `/safepatch`, and related PTE operations run `PteSafetyCheck()` before any write:
+
+1. **`ValidateMmPteBase()`** — reads PTE of ntoskrnl base, verifies Present + Executable. If flags don't match, MmPteBase is contaminated (DKOM interference).
+2. **`IsLargePage()`** — checks PDE.PS bit. 2MB large pages have no PTE layer; `ReadPte`/`WritePte` would read garbage.
+3. **DKOM driver warning** — if target VA belongs to ksafecenter64, kboot64, or kshutdown64, warns that PTE operations may be unreliable.
+
+This prevents the BSOD scenarios (0x50, 0xBE) that occurred when `/safepatch` was used on DKOM-hidden drivers with contaminated MmPteBase or large page code.
+
+### MmPteBase discovery (CR3 Walk)
+
+`FindMmPteBaseByCR3Walk()` has two paths:
+
+- **Path A (MapPhys):** Maps PML4 physical page via `MmMapIoSpace`, scans for self-reference entry. Fails on some low physical addresses.
+- **Path B (known-VA probe):** Uses ntoskrnl base as a probe — computes `PteVaOf(ntoskrnl)` for each candidate MmPteBase, then walks 3 more self-map levels to verify PML4 self-reference against CR3. No `MapPhys` needed, no unmapped VA reads, no BSOD risk.
+
+### ppm-engine cross-verification
+
+All kernel structure offsets (EPROCESS, OB_CALLBACK_ENTRY, DRIVER_OBJECT, PTE bits, Token EX_FAST_REF) have been cross-verified by [ppm-engine](https://pypi.org/project/ppm-engine/) v0.2.1 static analysis against ksafecenter64.sys, kshutdown64.sys, kboot64.sys, RTCore64.sys, and 470 system drivers. See `docs/ksafe_architecture.md` for full verification results.
 
 ## Credits
 

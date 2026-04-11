@@ -170,6 +170,13 @@ static bool ParseTimeFilter(const char* spec, FILETIME* outFt) {
         result.QuadPart = (ts + 11644473600ULL) * 10000000ULL;
     }
     else {
+        // YYYY-MM-DD (check first — "2026-04-10" would match %d%c as n=2026 unit='-')
+        SYSTEMTIME st = {};
+        if (sscanf(s.c_str(), "%hu-%hu-%hu", &st.wYear, &st.wMonth, &st.wDay) == 3
+            && st.wYear > 1970) {
+            SystemTimeToFileTime(&st, outFt);
+            return true;
+        }
         // Nd / Nh / Nw
         char unit = 0;
         int n = 0;
@@ -179,15 +186,7 @@ static bool ParseTimeFilter(const char* spec, FILETIME* outFt) {
             else if (unit == 'w') result.QuadPart = nowU.QuadPart - (ULONGLONG)n * WEEK;
             else return false;
         }
-        // YYYY-MM-DD
-        else {
-            SYSTEMTIME st = {};
-            if (sscanf(s.c_str(), "%hu-%hu-%hu", &st.wYear, &st.wMonth, &st.wDay) == 3) {
-                SystemTimeToFileTime(&st, outFt);
-                return true;
-            }
-            return false;
-        }
+        else return false;
     }
 
     outFt->dwLowDateTime = result.LowPart;
@@ -210,12 +209,16 @@ static std::vector<std::string> FindDumps(const char* dir,
     std::vector<std::pair<FILETIME, std::string>> entries;
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        if (afterFt && CompareFileTime(&fd.ftLastWriteTime, afterFt) < 0) continue;
-        if (beforeFt && CompareFileTime(&fd.ftLastWriteTime, beforeFt) > 0) continue;
+        // Convert file's UTC time to local time for comparison
+        // (ParseTimeFilter produces local time values)
+        FILETIME localFt;
+        FileTimeToLocalFileTime(&fd.ftLastWriteTime, &localFt);
+        if (afterFt && CompareFileTime(&localFt, afterFt) < 0) continue;
+        if (beforeFt && CompareFileTime(&localFt, beforeFt) > 0) continue;
 
         char full[MAX_PATH];
         snprintf(full, sizeof(full), "%s\\%s", dir, fd.cFileName);
-        entries.push_back({fd.ftLastWriteTime, full});
+        entries.push_back({localFt, full});
     } while (FindNextFileA(hFind, &fd));
     FindClose(hFind);
 
