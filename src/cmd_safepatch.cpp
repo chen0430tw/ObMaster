@@ -58,6 +58,12 @@ void CmdSafePatch(DWORD64 addr, const char* hexStr) {
         return;
     }
 
+    // ── Pre-flight safety check (validates MmPteBase + large page + DKOM) ──
+    if (!PteSafetyCheck(addr)) {
+        printf("[!] Aborting safepatch — safety check failed.\n");
+        return;
+    }
+
     // ── Identify driver ───────────────────────────────────────────────────
     KUtil::BuildDriverCache();
     const wchar_t* drvName = nullptr;

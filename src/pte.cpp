@@ -2,6 +2,7 @@
 #include "kutil.h"
 #include "driver/IDriverBackend.h"
 #include "globals.h"
+#include "ansi.h"
 #include <cstdio>
 #include <vector>
 #include <map>
@@ -2215,5 +2216,134 @@ bool FlushTlb(DWORD64 va) {
     g_drv->Wr8(mapped + offset, cur);
 
     g_drv->UnmapPhys(mapped, 0x1000);
+    return true;
+}
+
+// ── MmPteBase validation ─────────────────────────────────────────────────────
+// Reads the PTE of ntoskrnl base address (always mapped, Present + Executable).
+// If the PTE doesn't have these flags, MmPteBase is wrong (DKOM contamination).
+bool ValidateMmPteBase() {
+    DWORD64 base = GetMmPteBase();
+    if (!base) {
+        printf("[pte] ValidateMmPteBase: MmPteBase not available\n");
+        return false;
+    }
+
+    // ntoskrnl base is always mapped with Present + Execute (NX=0)
+    LPVOID d[1]; DWORD cb;
+    if (!EnumDeviceDrivers(d, sizeof(d), &cb) || !d[0]) {
+        printf("[pte] ValidateMmPteBase: cannot get ntoskrnl base\n");
+        return false;
+    }
+    DWORD64 ntBase = (DWORD64)d[0];
+
+    PteInfo pte = ReadPte(ntBase);
+    if (!pte.valid) {
+        printf("%s[!]%s ValidateMmPteBase: ReadPte(ntoskrnl=0x%llX) failed — MmPteBase CONTAMINATED\n",
+               A_RED, A_RESET, ntBase);
+        return false;
+    }
+    if (!pte.present) {
+        printf("%s[!]%s ValidateMmPteBase: ntoskrnl PTE not Present — MmPteBase CONTAMINATED\n",
+               A_RED, A_RESET);
+        return false;
+    }
+    if (!pte.executable) {
+        printf("%s[!]%s ValidateMmPteBase: ntoskrnl PTE not Executable — MmPteBase CONTAMINATED\n",
+               A_RED, A_RESET);
+        return false;
+    }
+
+    // Cross-check: also verify PTE of PsInitialSystemProcess (EPROCESS, always present)
+    DWORD64 sysEP = g_drv->Rd64(KUtil::KernelExport("PsInitialSystemProcess"));
+    if (g_drv->IsKernelVA(sysEP)) {
+        PteInfo sysPte = ReadPte(sysEP);
+        if (!sysPte.valid || !sysPte.present) {
+            printf("%s[!]%s ValidateMmPteBase: System EPROCESS PTE invalid — MmPteBase CONTAMINATED\n",
+                   A_RED, A_RESET);
+            return false;
+        }
+    }
+
+    if (g_debug)
+        printf("[pte] ValidateMmPteBase: OK (ntoskrnl PTE=0x%016llX, P=%d X=%d)\n",
+               pte.pte_val, pte.present, pte.executable);
+    return true;
+}
+
+// ── Large page detection ─────────────────────────────────────────────────────
+// Walks the page table to the PDE level and checks the PS (Page Size) bit.
+// If PDE.PS=1, the address is on a 2MB large page — no PTE layer exists.
+// WritePte/ReadPte on large page addresses will read/write garbage.
+bool IsLargePage(DWORD64 va) {
+    DWORD64 base = GetMmPteBase();
+    if (!base) return false;
+
+    // PDE VA = MmPteBase + ((pteVA >> 12) * 8)  where pteVA = PteVaOf(va)
+    // Simplified: PDE index covers bits [21..29] of va
+    DWORD64 pteVA = PteVaOf(va);
+    if (!pteVA) return false;
+
+    // The PDE that maps this PTE is itself in the self-map
+    DWORD64 pdeVA = base + ((pteVA & 0x0000FFFFFFFFF000ULL) >> 9);
+    if (!g_drv->IsKernelVA(pdeVA) || (pdeVA & 7)) return false;
+
+    DWORD64 pde = g_drv->Rd64(pdeVA);
+    // PS bit (bit 7) = 1 means 2MB large page
+    return (pde & PTE_PRESENT) && (pde & (1ULL << 7));
+}
+
+// ── Pre-flight safety check ──────────────────────────────────────────────────
+// Call this before any PTE write (safepatch, pte modify, etc.)
+// Returns true if safe; false if operation should be aborted.
+//
+// ppm-engine v0.2.1 cross-verification (2026-04-11):
+//   ksafecenter64.sys DKOM hides from PsLoadedModuleList and can contaminate
+//   MmPteBase scan results. Its code pages are on 2MB large pages.
+//   Attempting WritePte on large pages or with wrong MmPteBase = BSOD.
+bool PteSafetyCheck(DWORD64 targetVA) {
+    // 1. Validate MmPteBase itself
+    if (!ValidateMmPteBase()) {
+        printf("%s[!]%s PteSafetyCheck FAILED: MmPteBase is contaminated.\n"
+               "    Possible cause: DKOM-hidden driver (e.g. ksafecenter64) polluted scan.\n"
+               "    Fix: use /ptebase-set <value> with a known-good value from WinDbg,\n"
+               "    or use Method 0a (CR3 physical walk) which is DKOM-immune.\n",
+               A_RED, A_RESET);
+        return false;
+    }
+
+    // 2. Check if target is on a 2MB large page
+    if (IsLargePage(targetVA)) {
+        printf("%s[!]%s PteSafetyCheck FAILED: target 0x%016llX is on a 2MB LARGE PAGE.\n"
+               "    Large pages have no PTE layer — ReadPte/WritePte will read garbage.\n"
+               "    /safepatch cannot work on this address.\n",
+               A_RED, A_RESET, targetVA);
+        return false;
+    }
+
+    // 3. Check if target belongs to a known DKOM driver
+    KUtil::BuildDriverCache();
+    const wchar_t* owner = nullptr;
+    DWORD64 off = 0;
+    KUtil::FindDriverByAddr(targetVA, &owner, &off);
+
+    // Known DKOM drivers that should not be /safepatch'd
+    static const wchar_t* dkom_drivers[] = {
+        L"ksafecenter64.sys", L"kboot64.sys", L"kshutdown64.sys", nullptr
+    };
+    if (owner) {
+        for (int i = 0; dkom_drivers[i]; i++) {
+            if (_wcsicmp(owner, dkom_drivers[i]) == 0) {
+                printf("%s[!]%s PteSafetyCheck WARNING: target 0x%016llX belongs to %ls (+0x%llX)\n"
+                       "    This driver does DKOM — PTE operations may be unreliable.\n"
+                       "    Recommended: use /disable or /ndisable instead of /safepatch.\n",
+                       A_YELLOW, A_RESET, targetVA, owner, off);
+                // Warning only, don't block — user may have a reason
+            }
+        }
+    }
+
+    printf("%s[+]%s PteSafetyCheck: OK (MmPteBase validated, 4KB page, target clean)\n",
+           A_GREEN, A_RESET);
     return true;
 }

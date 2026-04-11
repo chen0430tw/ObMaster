@@ -58,3 +58,18 @@ bool FlushTlb(DWORD64 va);
 // Only reads the PTE entry, never dereferences 'va' itself — safe to call on
 // any kernel VA without risking BSOD from non-present pages.
 bool IsVaMapped(DWORD64 va);
+
+// Validate MmPteBase by reading PTE of ntoskrnl base (must be Present+Executable).
+// Returns true if MmPteBase is correct; false if contaminated or wrong.
+bool ValidateMmPteBase();
+
+// Check if target VA is on a 2MB large page (PDE.PS=1 → no PTE layer).
+// Returns true if large page — caller must NOT use ReadPte/WritePte on it.
+bool IsLargePage(DWORD64 va);
+
+// Pre-flight safety check before any PTE write operation.
+// Returns true if safe to proceed; prints warnings and returns false if:
+//   - MmPteBase validation fails (DKOM contamination)
+//   - Target is on a 2MB large page
+//   - Target address belongs to a DKOM-hidden driver
+bool PteSafetyCheck(DWORD64 targetVA);

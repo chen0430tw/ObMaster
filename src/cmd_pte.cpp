@@ -96,6 +96,14 @@ void CmdPte(DWORD64 va, bool setWrite, bool clearNx, DWORD64 restoreVal) {
 
     printf("[*] Walking page tables for VA 0x%016llX%s\n\n", va, modSuffix);
 
+    // Pre-flight safety check if writing PTE
+    if (setWrite || clearNx || restoreVal) {
+        if (!PteSafetyCheck(va)) {
+            printf("[!] Aborting PTE modification — safety check failed.\n");
+            return;
+        }
+    }
+
     // Ensure MmPteBase is resolved
     DWORD64 pteBase = GetMmPteBase();
     if (!pteBase) {
