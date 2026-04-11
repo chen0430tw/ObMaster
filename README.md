@@ -1,8 +1,10 @@
 # ObMaster
 
 > BYOVD-powered kernel toolkit — see what System Informer can't.
+>
+> 60 commands across 8 categories: recon, callbacks, handles, drivers, memory/PTE, diagnostics, privilege escalation, and winlogon.
 
-Process inspection, PPL bypass, two-stage UAC bypass (COM + kernel token steal), kernel code patching with TLB flush, privilege escalation, service/driver enumeration, network state, ObRegisterCallbacks management, Ps\*NotifyRoutine enumeration/disable, handle enumeration/suppression, minifilter inspection/detach, and force USB eject via RTCore64.sys (CVE-2019-16098).
+Process inspection, PPL bypass, two-stage UAC bypass (COM + kernel token steal), kernel code patching via shadow-page PTE swap, 12-method MmPteBase discovery, VA↔PA translation, privilege escalation, service/driver enumeration, network state, ObRegisterCallbacks management, CmCallback/Ps\*NotifyRoutine enumeration/disable, handle enumeration/suppression, minifilter inspection/detach, BSOD dump analysis, and force USB eject — all via RTCore64.sys (CVE-2019-16098).
 
 ## Commands
 
@@ -426,16 +428,18 @@ Each array entry is an `EX_CALLBACK` (`EX_FAST_REF`). Decoding: `block = value &
 
 This prevents the BSOD scenarios (0x50, 0xBE) that occurred when `/safepatch` was used on DKOM-hidden drivers with contaminated MmPteBase or large page code.
 
-### MmPteBase discovery (CR3 Walk)
+### MmPteBase discovery (12 methods)
 
-`FindMmPteBaseByCR3Walk()` has two paths:
+`GetMmPteBase()` tries 12 methods in order. The two most reliable:
 
-- **Path A (MapPhys):** Maps PML4 physical page via `MmMapIoSpace`, scans for self-reference entry. Fails on some low physical addresses.
-- **Path B (known-VA probe):** Uses ntoskrnl base as a probe — computes `PteVaOf(ntoskrnl)` for each candidate MmPteBase, then walks 3 more self-map levels to verify PML4 self-reference against CR3. No `MapPhys` needed, no unmapped VA reads, no BSOD risk.
+- **Method 1 (PDB):** `dbghelp.dll SymFromName("MmPteBase")` — same path as kd.exe, needs symbol cache or internet.
+- **Method 10 (MiGetPteAddr imm64):** Reads `MiGetPteAddress` machine code from kernel `.text` via `Rd64`, extracts the `MOV RAX, imm64` immediate (KASLR-patched at boot). Zero BSOD risk, no symbols needed.
+
+Use `/ptebase --method N` to test any specific method (1-12). See `docs/kd_vs_livekd_analysis.md` for full 12-method documentation and test results.
 
 ### ppm-engine cross-verification
 
-All kernel structure offsets (EPROCESS, OB_CALLBACK_ENTRY, DRIVER_OBJECT, PTE bits, Token EX_FAST_REF) have been cross-verified by [ppm-engine](https://pypi.org/project/ppm-engine/) v0.2.1 static analysis against ksafecenter64.sys, kshutdown64.sys, kboot64.sys, RTCore64.sys, and 470 system drivers. See `docs/ksafe_architecture.md` for full verification results.
+All kernel structure offsets (EPROCESS, OB_CALLBACK_ENTRY, DRIVER_OBJECT, PTE bits, Token EX_FAST_REF) have been cross-verified by [ppm-engine](https://pypi.org/project/ppm-engine/) v0.2.2 static analysis against ksafecenter64.sys, kshutdown64.sys, kboot64.sys, RTCore64.sys, and 470 system drivers. See `docs/ksafe_architecture.md` for full verification results.
 
 ## Credits
 
