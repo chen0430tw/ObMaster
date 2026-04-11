@@ -742,6 +742,100 @@ CleanFileNamesInformation               — 隐藏文件名
 
 ---
 
+## 多驱动拆除顺序（全栈卸载）
+
+云更新驱动栈有**交叉保护**：ksafecenter64 保护注册表 → kboot64 也保护注册表 →
+kshutdown64 依赖 ksafecenter64 的 ObCallback 保护 → 必须按正确顺序拆。
+
+### 拆除优先级（由高到低）
+
+```
+Phase 1: 解除保护层（不卸载驱动，只拆回调）
+─────────────────────────────────────────────
+① ksafecenter64  CmCallback     /notify registry --kill ksafecenter64
+② kboot64        CmCallback     /notify registry --kill kboot64
+   ↑ 必须最先拆这两个，否则后续所有 SCM/注册表操作被拦截
+
+③ ksafecenter64  ObCallback     /obcb → /disable <PreOp_addr>
+   ↑ 拆完后 OpenProcess 不再被剥夺权限
+
+④ ksafecenter64  ImageNotify    /notify image → /ndisable <addr>
+⑤ kshutdown64    ProcessNotify  /notify process → /ndisable <addr>
+⑥ kshutdown64    ImageNotify    /notify image → /ndisable <addr>
+⑦ kboot64        ProcessNotify  /notify process → /ndisable <addr>
+⑧ kboot64        ImageNotify    /notify image → /ndisable <addr>
+⑨ kcachec64      ProcessNotify  /notify process → /ndisable <addr>
+
+⑩ ksafecenter64  MiniFilter     /flt-detach ksafecenter64 C:
+   ↑ 文件系统过滤最后拆（影响最小）
+
+Phase 2: 卸载驱动（引用已清零，安全卸载）
+─────────────────────────────────────────────
+⑪ ksafecenter64   /force-stop ksafecenter64
+⑫ kshutdown64     /force-stop kshutdown64
+⑬ kboot64         /force-stop kboot64
+⑭ kcachec64       /force-stop kcachec64
+
+Phase 3: 非保护驱动（无回调，直接卸）
+─────────────────────────────────────────────
+⑮ krestore64      /force-stop krestore64
+⑯ KScsiDisk64     /force-stop KScsiDisk64
+⑰ kdisk64         /force-stop kdisk64
+⑱ kantiarp64      /force-stop kantiarp64
+⑲ kpowershutdown64  /force-stop kpowershutdown64
+```
+
+### 为什么这个顺序
+
+| 规则 | 原因 |
+|------|------|
+| CmCallback 最先拆 | 它锁住注册表，不拆它后续 SCM 全部 ACCESS_DENIED |
+| ObCallback 第二拆 | 它拦截 OpenProcess，不拆它杀不了用户态进程 |
+| Notify 第三拆 | 它监控进程/DLL 加载，不拆它保护组件会重生 |
+| MiniFilter 第四拆 | 文件隐藏，影响最小但阻碍取证 |
+| ksafecenter64 先于 kshutdown64 | kshutdown 依赖 ksafe 的 ObCallback 保护 |
+| kboot64 和 ksafe 并列 | 两者都有 CmCallback，互相掩护 |
+| 非保护驱动最后 | 无回调，直接 force-stop 无风险 |
+
+### 系统级 minifilter 干扰因素
+
+fltmc 列表中还有非云更新的 filter 会影响拆除：
+
+| Filter | Altitude | 来源 | 影响 |
+|--------|----------|------|------|
+| **WdFilter** | 328010 | Windows Defender | 可能拦截驱动卸载/可疑操作 |
+| **mfehidk** | 321300 | McAfee | 可能拦截注册表/进程操作 |
+| **gameflt** | 189850 | 游戏反作弊 | 可能与 vgk64 联动 |
+
+**WdFilter 处理**：
+
+首选 — 添加排除规则（不需要卸载）：
+```bash
+# 以 SYSTEM 权限写入 Defender 排除规则（普通 Admin 写入失败）
+ObMaster /runas system reg add "HKLM\SOFTWARE\Microsoft\Windows Defender\Exclusions\Processes" /v VirtualBoxVM.exe /t REG_DWORD /d 0 /f
+ObMaster /runas system reg add "HKLM\SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths" /v "C:\Program Files\Oracle\VirtualBox" /t REG_DWORD /d 0 /f
+```
+
+备选 — 排除规则不够时的升级手段：
+- 如果 WdFilter ObCallback 仍然拦截 VBox，用 `/disable` 清零 Pre 指针（参见 VBOX_DEBUG.md）
+- 实战前 `sc stop WinDefend` 或组策略关闭 Defender 实时保护
+- 如果 WdFilter 拦截了 ObMaster 操作，用 `/flt-detach WdFilter C:` 临时卸载
+- WdFilter 有 8 个实例（所有卷），需要逐卷 detach
+
+**ksafecenter64 minifilter 状态**：
+- fltmc 中未出现（FltStartFiltering 可能未执行或注册失败）
+- 驱动代码中有 `FltRegisterFilter` 但 ppm 显示 `FltUnregisterFilter` 无调用者
+- 如果已激活，需要在 Phase 1 步骤 ⑩ 中 detach
+
+### 注意事项
+- WdFilter 不需要卸载，添加 Defender 排除规则即可（见上方命令）
+- vgk64.sys（Valorant Vanguard）独立于云更新，有自己的保护体系，需要单独处理
+- 如果任何 `/force-stop` 后驱动变僵尸，用 `/objdir \Driver` 取 DRIVER_OBJECT VA，
+  再用 `/drv-unload <name> <va>` 走 patch DriverUnload 路径
+- 拆除过程中不要重启 — 重启后所有驱动自动重新加载注册回调
+
+---
+
 ## 待完成
 
 ### 逆向分析
