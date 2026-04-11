@@ -535,6 +535,102 @@ kboot64 是整个驱动栈中最危险的组件 (222K, 最大):
 5. kcachec64     -- /ndisable ProcessNotify (清除辅助监控)
 ```
 
+### Evil Handle 根因与 VBox 修复方案 (ppm 确认)
+
+**问题链条:**
+```
+VBoxSup 启动时扫描 System(PID 4) 句柄表
+  → 发现 0x200 或 0x1FFFFF 的句柄指向 VBox 进程
+  → 判定为 evil handle → VERR_SUP_VP_FOUND_EVIL_HANDLE (-3738)
+  → VBox 拒绝启动
+```
+
+**ppm 确认的根因:**
+```
+ksafecenter64 PreOp (0x78B8)
+  → 每次有进程 OpenProcess 时触发
+  → 调用 IsProtectedPid (0x7600)
+  → 内部 ObOpenObjectByPointer(DesiredAccess=0x200) 创建瞬态句柄
+  → ZwQueryInformationProcess 读进程信息
+  → ZwClose 关闭句柄
+  → 句柄只存在微秒级窗口，但 VBoxSup 扫描恰好命中
+```
+
+**为什么 `/handle-close` 无效:**
+句柄是瞬态竞态产物（微秒级生命周期），`/handle-close` 追不上。
+即使关了一个，下一次 OpenProcess 触发 PreOp 又会产生新的。
+
+**正确修复: 断源头（2 条命令）**
+```bash
+ObMaster /obcb                    # 找到 ksafecenter64 PreOp 地址
+ObMaster /disable <PreOp_addr>    # 清零 PreOp → IsProtectedPid 永不调用 → 无瞬态句柄
+```
+
+### 僵尸驱动完整分析 (ppm 确认)
+
+**为什么 `/force-stop` 卸不掉:**
+
+`/force-stop` 往 DriverUnload (+0x68) 写入 `xor eax,eax; ret` stub，
+让 NtUnloadDriver → IopUnloadDriver 能调用 DriverUnload 不报错。
+
+但 stub 只是 `return 0`，没有做任何清理。IopUnloadDriver 内部：
+```c
+DriverObject->DriverUnload(DriverObject);  // ← stub 直接返回
+if (DriverObject->DeviceObject != NULL)
+    return;  // ← 设备对象还在！不释放！→ 僵尸
+```
+
+**为什么 `/drv-unload` 也卸不掉:**
+
+`/drv-unload` 走 SCM 路径 (ControlService SERVICE_CONTROL_STOP)，
+但 ksafecenter64 的 CmCallback (0x7C20) 拦截注册表写入：
+```
+SCM 需要修改 HKLM\SYSTEM\CurrentControlSet\Services\ksafecenter64
+→ CmCallback 返回 STATUS_ACCESS_DENIED (0xC0000022)
+→ OpenService 失败: error 5 (ACCESS_DENIED)
+```
+CmCallback 保护了自己的服务注册表键，形成死锁：要卸载它就得改注册表，改注册表被它自己拦截。
+
+**PointerCount 引用来源 (ppm 逐层确认):**
+```
++1  DRIVER_OBJECT body (始终存在)
++1  \Device\SafeCenter (DeviceObject)
++1  \Device\SFFireWall (DeviceObject)
++N  ObRegisterCallbacks 注册 (PreOp/PostOp 回调)
++1  CmRegisterCallbackEx 注册 (cookie 存在 RVA 0x15A58)
++1  FltRegisterFilter minifilter 实例
++1  PsSetLoadImageNotifyRoutine 注册
++1  Object Directory \Driver\ksafecenter64 引用
+```
+
+**正确的完整卸载顺序（逆序拆引用）:**
+```bash
+# 1. 撤销 ObCallback (PointerCount -N)
+ObMaster /obcb
+ObMaster /disable <PreOp_addr>
+
+# 2. 撤销 notify routines (PointerCount -1 each)
+ObMaster /notify process
+ObMaster /ndisable <ksafe_notify_addr>
+ObMaster /notify image
+ObMaster /ndisable <ksafe_image_addr>
+
+# 3. 卸 minifilter instance (PointerCount -1)
+ObMaster /flt-detach ksafecenter64 C:
+
+# 4. 杀 CmCallback — 解除注册表保护死锁 (PointerCount -1)
+ObMaster /notify registry --kill ksafecenter64
+
+# 5. PointerCount 降到接近 1 后，force-stop
+ObMaster /force-stop ksafecenter64
+
+# 6. 如果 auto-discovery 失败 (DKOM)，手动取地址
+ObMaster /objdir \Driver
+ObMaster /drv-unload ksafecenter64 <drvobj_va>
+```
+
+**关键: 不按顺序拆会变僵尸。必须先拆引用再卸载。**
+
 ---
 
 ## 待完成
