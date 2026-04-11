@@ -1,5 +1,7 @@
 #include <Windows.h>
 #include <Psapi.h>
+#include <DbgHelp.h>
+#pragma comment(lib, "dbghelp.lib")
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -551,86 +553,173 @@ void CmdNotifyRegistry(const char* killDriver, DWORD64 killKva, bool killUnknown
     DWORD64 arrayVA = FindCmpCallBackVector(hNt, userBase, kernBase);
     FreeLibrary(hNt);
 
-    if (!arrayVA) {
-        printf("[!] Failed to locate CmpCallBackVector\n");
-        return;
-    }
-    printf("CmpCallBackVector @ %p\n", (void*)arrayVA);
-
-    // Reuse the same EX_CALLBACK scan logic as Psp* arrays (ScanArray),
-    // but with CM_ARRAY_MAX slots instead of NOTIFY_MAX.
+    // ── Method 1: EX_CALLBACK array scan (legacy, pre-19041 kernels) ──────
     std::vector<NotifyEntry> v;
-    for (int i = 0; i < CM_ARRAY_MAX; i++) {
-        DWORD64 slotAddr = arrayVA + (DWORD64)i * 8;
-        DWORD64 rawRef   = g_drv->Rd64(slotAddr);
-        if (!rawRef) continue;
 
-        DWORD64 block = DecodeRef(rawRef);
-        DBG("  cm_slot[%d] raw=%p block=%p", i, (void*)rawRef, (void*)block);
-        if (!g_drv->IsKernelVA(block)) { DBG(" [skip:bad block]\n"); continue; }
+    if (arrayVA) {
+        printf("CmpCallBackVector @ %p (array mode)\n", (void*)arrayVA);
+        for (int i = 0; i < CM_ARRAY_MAX; i++) {
+            DWORD64 slotAddr = arrayVA + (DWORD64)i * 8;
+            DWORD64 rawRef   = g_drv->Rd64(slotAddr);
+            if (!rawRef) continue;
 
-        DWORD64 fn = g_drv->Rd64(block + ECRB_FUNCTION);
-        if (!fn || !g_drv->IsKernelVA(fn)) { DBG(" [skip:bad fn=%p]\n", (void*)fn); continue; }
-        // Reject self-referential fn (fn points back into the array itself)
-        if (fn >= arrayVA && fn < arrayVA + (DWORD64)CM_ARRAY_MAX * 8) {
-            DBG(" [skip:fn in array]\n"); continue;
+            DWORD64 block = DecodeRef(rawRef);
+            DBG("  cm_slot[%d] raw=%p block=%p", i, (void*)rawRef, (void*)block);
+            if (!g_drv->IsKernelVA(block)) { DBG(" [skip:bad block]\n"); continue; }
+
+            DWORD64 fn = g_drv->Rd64(block + ECRB_FUNCTION);
+            if (!fn || !g_drv->IsKernelVA(fn)) { DBG(" [skip:bad fn=%p]\n", (void*)fn); continue; }
+            if (fn >= arrayVA && fn < arrayVA + (DWORD64)CM_ARRAY_MAX * 8) {
+                DBG(" [skip:fn in array]\n"); continue;
+            }
+            DBG(" fn=%p\n", (void*)fn);
+
+            {
+                DWORD64 fnFirst = g_drv->Rd64(fn);
+                if (g_drv->IsKernelVA(fnFirst)) continue;
+                if (fnFirst == 0) continue;
+                BYTE fb[8]; memcpy(fb, &fnFirst, 8);
+                int nz = 0; for (int b = 0; b < 8; b++) if (fb[b] == 0) nz++;
+                if (nz >= 5) continue;
+            }
+
+            DWORD64 ctx = g_drv->Rd64(block + 0x10);
+            NotifyEntry e{};
+            e.index        = i;
+            e.slotAddr     = slotAddr;
+            e.routineBlock = block;
+            e.function     = fn;
+            e.context      = ctx;
+            e.ctxOwner     = nullptr;
+            e.ctxOwnerOff  = 0;
+            KUtil::FindDriverByAddr(fn, &e.owner, &e.ownerOff);
+            if (e.ownerOff > 0x4000000) { e.owner = L"<unknown>"; e.ownerOff = 0; }
+            if (ctx && g_drv->IsKernelVA(ctx)) {
+                KUtil::FindDriverByAddr(ctx, &e.ctxOwner, &e.ctxOwnerOff);
+                if (e.ctxOwnerOff > 0x4000000) { e.ctxOwner = nullptr; e.ctxOwnerOff = 0; }
+            }
+            v.push_back(e);
         }
-        DBG(" fn=%p\n", (void*)fn);
+    }
 
-        // Validate: fn must point to actual code, not data/pointers.
-        // Real callback functions start with x64 instructions (sub rsp, push, mov, lea, etc).
-        // Stale/garbage entries often have fn pointing to pool LIST_ENTRY nodes where
-        // the first QWORD is a kernel VA (Flink pointer), not an instruction.
+    // ── Method 2: CallbackListHead linked list (Win10 19041+) ─────────────
+    // On 19041+ the CmCallback entries are stored as a doubly-linked list
+    // at nt!CallbackListHead, not a fixed array. Each node layout:
+    //   +0x00  LIST_ENTRY (Flink/Blink)
+    //   +0x28  Function pointer (callback)
+    //   +0x20  Context pointer
+    //   +0x30  Altitude UNICODE_STRING
+    // Always try linked list too — array may find FLTMGR but miss ksafe.
+    {
+        // Try to find CallbackListHead via PDB symbol
+        DWORD64 listHead = 0;
         {
-            DWORD64 fnFirst = g_drv->Rd64(fn);
-            // If first 8 bytes at fn look like a kernel VA, it's data, not code
-            if (g_drv->IsKernelVA(fnFirst)) {
-                DBG("  cm_slot[%d] fn=%p first qword=%p (kernel VA = data, not code) -> skip\n",
-                    i, (void*)fn, (void*)fnFirst);
-                continue;
-            }
-            // Also reject if first qword is zero (unmapped/freed)
-            if (fnFirst == 0) {
-                DBG("  cm_slot[%d] fn=%p first qword=0 -> skip\n", i, (void*)fn);
-                continue;
-            }
-            // If 5+ of the 8 bytes are zero, it's data (small integer/counter), not code.
-            // Real x64 instructions are dense — e.g. "48 83 EC 28 48 83 C1 08" has 0 zero bytes.
-            BYTE fb[8]; memcpy(fb, &fnFirst, 8);
-            int nz = 0;
-            for (int b = 0; b < 8; b++) if (fb[b] == 0) nz++;
-            if (nz >= 5) {
-                DBG("  cm_slot[%d] fn=%p first qword has %d zero bytes (data, not code) -> skip\n",
-                    i, (void*)fn, nz);
-                continue;
+            HANDLE hSym = (HANDLE)(ULONG_PTR)0xDEAD0099;
+            SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+            WCHAR symPath[512];
+            wcscpy_s(symPath, L"srv*C:\\Symbols*https://msdl.microsoft.com/download/symbols;"
+                              L"C:\\Program Files (x86)\\Windows Kits\\10\\Debuggers\\x64\\sym");
+            if (SymInitializeW(hSym, symPath, FALSE)) {
+                WCHAR ntPath[MAX_PATH];
+                WCHAR winDir[MAX_PATH]; GetWindowsDirectoryW(winDir, MAX_PATH);
+                swprintf_s(ntPath, L"%s\\System32\\ntoskrnl.exe", winDir);
+                DWORD64 modBase = SymLoadModuleExW(hSym, nullptr, ntPath, nullptr, kernBase, 0x1100000, nullptr, 0);
+                if (modBase || GetLastError() == 0) {
+                    if (!modBase) modBase = kernBase;
+                    BYTE symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME] = {};
+                    SYMBOL_INFO* sym = (SYMBOL_INFO*)symBuf;
+                    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+                    sym->MaxNameLen = MAX_SYM_NAME;
+                    if (SymFromName(hSym, "CallbackListHead", sym))
+                        listHead = sym->Address;
+                    else if (SymFromName(hSym, "nt!CallbackListHead", sym))
+                        listHead = sym->Address;
+                }
+                SymCleanup(hSym);
             }
         }
 
-        DWORD64 ctx = g_drv->Rd64(block + 0x10);
-
-        NotifyEntry e{};
-        e.index        = i;
-        e.slotAddr     = slotAddr;
-        e.routineBlock = block;
-        e.function     = fn;
-        e.context      = ctx;
-        e.ctxOwner     = nullptr;
-        e.ctxOwnerOff  = 0;
-        KUtil::FindDriverByAddr(fn, &e.owner, &e.ownerOff);
-        // Sanity: if offset > 64 MB, the match is bogus (pool addr, not in any module)
-        if (e.ownerOff > 0x4000000) {
-            e.owner    = L"<unknown>";
-            e.ownerOff = 0;
-        }
-        // Resolve context pointer owner too
-        if (ctx && g_drv->IsKernelVA(ctx)) {
-            KUtil::FindDriverByAddr(ctx, &e.ctxOwner, &e.ctxOwnerOff);
-            if (e.ctxOwnerOff > 0x4000000) {
-                e.ctxOwner    = nullptr;
-                e.ctxOwnerOff = 0;
+        if (!listHead) {
+            // Fallback: try LEA scan for CallbackListHead near CmRegisterCallbackEx
+            // The address is typically at CmpCallbackListLock+8
+            // CmpCallbackListLock is one of our candidates
+            DBG("CallbackListHead: PDB lookup failed, trying LEA candidates +8\n");
+            // Reload ntoskrnl for scanning
+            HMODULE hNt2 = LoadLibraryW(L"ntoskrnl.exe");
+            if (hNt2) {
+                BYTE* fnCm = (BYTE*)GetProcAddress(hNt2, "CmRegisterCallbackEx");
+                if (fnCm) {
+                    for (int i = 0; i < 512 - 6; i++) {
+                        if ((fnCm[i] == 0x48 || fnCm[i] == 0x4C) &&
+                            fnCm[i+1] == 0x8D && (fnCm[i+2] & 0xC7) == 0x05) {
+                            INT32 disp = *(INT32*)(fnCm + i + 3);
+                            DWORD64 userTgt = (DWORD64)(fnCm + i + 7) + (INT64)disp;
+                            DWORD64 rva = userTgt - (DWORD64)hNt2;
+                            DWORD64 va = kernBase + rva;
+                            // CallbackListHead: first QWORD should be a pool VA (Flink)
+                            DWORD64 flink = g_drv->Rd64(va);
+                            if (g_drv->IsKernelVA(flink) && flink != va) {
+                                // Verify: Flink->Blink should point back to head
+                                DWORD64 blink = g_drv->Rd64(flink + 8);
+                                if (blink == va) {
+                                    listHead = va;
+                                    DBG("CallbackListHead found via LEA: %p (Flink=%p)\n",
+                                        (void*)va, (void*)flink);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                FreeLibrary(hNt2);
             }
         }
-        v.push_back(e);
+
+        if (listHead) {
+            printf("CallbackListHead @ %p (linked list mode)\n", (void*)listHead);
+
+            // Walk the linked list
+            DWORD64 cur = g_drv->Rd64(listHead);  // Flink
+            int idx = 0;
+            while (g_drv->IsKernelVA(cur) && cur != listHead && idx < 64) {
+                // Node layout: +0x00 Flink, +0x08 Blink, +0x28 Function, +0x20 Context
+                DWORD64 fn  = g_drv->Rd64(cur + 0x28);
+                DWORD64 ctx = g_drv->Rd64(cur + 0x20);
+
+                if (fn && g_drv->IsKernelVA(fn)) {
+                    // Dedup: skip if already found by array scan
+                    bool dup = false;
+                    for (auto& existing : v) {
+                        if (existing.function == fn) { dup = true; break; }
+                    }
+                    if (dup) { cur = g_drv->Rd64(cur); idx++; continue; }
+
+                    NotifyEntry e{};
+                    e.index        = idx;
+                    e.slotAddr     = cur;       // node address (for --kill)
+                    e.routineBlock = cur;
+                    e.function     = fn;
+                    e.context      = ctx;
+                    e.ctxOwner     = nullptr;
+                    e.ctxOwnerOff  = 0;
+                    KUtil::FindDriverByAddr(fn, &e.owner, &e.ownerOff);
+                    if (e.ownerOff > 0x4000000) { e.owner = L"<unknown>"; e.ownerOff = 0; }
+                    if (ctx && g_drv->IsKernelVA(ctx)) {
+                        KUtil::FindDriverByAddr(ctx, &e.ctxOwner, &e.ctxOwnerOff);
+                        if (e.ctxOwnerOff > 0x4000000) { e.ctxOwner = nullptr; e.ctxOwnerOff = 0; }
+                    }
+                    v.push_back(e);
+                }
+
+                cur = g_drv->Rd64(cur);  // next Flink
+                idx++;
+            }
+        }
+    }
+
+    if (v.empty() && !arrayVA && !killDriver) {
+        printf("[!] Failed to locate CmpCallBackVector or CallbackListHead\n");
+        return;
     }
 
     if (g_jsonMode) {
