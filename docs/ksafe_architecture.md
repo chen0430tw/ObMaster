@@ -68,17 +68,28 @@ B:\lwclient64\
 
 ## 驱动栈组成
 
-| 驱动 | 职能 | 威胁等级（对 VBox）|
-|------|------|------------------|
-| `ksafecenter64.sys` | ObCallback 进程保护 + LoadImage notify | 高（L1-L3）|
-| `kshutdown64.sys` | 进程黑名单执行引擎（APC + notify） | 高（L4）|
-| `kcachec64.sys` | CreateProcess notify + 线程监控 | 中（待分析）|
-| `kpowershutdown64.sys` | 电源/关机控制 | 低 |
-| `kantiarp64.sys` | ARP 防火墙 | 无直接威胁 |
-| `kdisk64.sys` | 磁盘控制 | 无直接威胁 |
-| `krestore64.sys` | 影子还原 | 无直接威胁 |
-| `kscsidisk64.sys` | SCSI 磁盘过滤 | 无直接威胁 |
-| `kboot64.sys` | 启动控制 | 无直接威胁 |
+> ppm-engine v0.2.2 静态分析验证，2026-04-11（PC44 网咖实机）
+
+| 驱动 | ppm 类型 | 回调注册 | 自保护机制 | 威胁等级（对 VBox）|
+|------|---------|---------|-----------|------------------|
+| `ksafecenter64.sys` | `protection_minifilter` | ObCallback, CmCallback, ImageLoad notify, Minifilter | 无 DriverUnload; 注册表保护; handle 权限剥夺 | **高**（L1-L3）|
+| `kshutdown64.sys` | `apc_injector` | Process notify, ImageLoad notify | 无 DriverUnload; MmGetSystemRoutineAddress 动态解析 | **高**（L4）|
+| `kboot64.sys` | `apc_injector` | CmCallback, Process notify, ImageLoad notify | 无 DriverUnload; 注册表保护; MmGetSystemRoutineAddress; **EPROCESS DKOM** | **高**（APC 注入 + CmCallback + DKOM）|
+| `vgk64.sys` | `apc_injector` (packed) | （packed 内部隐藏） | 无 DriverUnload; **EPROCESS DKOM** | **中**（反作弊，可能干扰 VBox）|
+| `kcachec64.sys` | `process_monitor` | Process notify | 无 DriverUnload; MmGetSystemRoutineAddress | **中**（进程监控，可能上报）|
+| `KScsiDisk64.sys` | `process_monitor` | Process notify, ImageLoad notify | 无 DriverUnload; MmGetSystemRoutineAddress | **低**（磁盘驱动但有进程监控）|
+| `krestore64.sys` | `generic_driver` | 无 | 无 DriverUnload; MmGetSystemRoutineAddress; **EPROCESS DKOM** | **低**（磁盘还原，但有 DKOM 能力）|
+| `kdisk64.sys` | `generic_driver` | 无 | 无 DriverUnload | 无 |
+| `kantiarp64.sys` | `generic_driver` | 无 | 无 DriverUnload | 无（ARP 防火墙）|
+| `kpowershutdown64.sys` | `generic_driver` | 无 | 无 DriverUnload | 无（电源控制）|
+
+### ppm-engine 关键发现（2026-04-11）
+
+1. **kboot64.sys 比预期危险得多**：确认为 `apc_injector`，具备 APC 注入 + CmCallback + EPROCESS DKOM。之前仅当作 PnP 硬件配置驱动，实际可注入并杀进程。
+2. **kcachec64.sys**（此前未分析）：`process_monitor` 类型，注册 CreateProcess notify，可能是 kshutdown 的辅助监控组件。
+3. **所有云更新驱动均无 DriverUnload**：全部"加载不走"设计，必须用 ObMaster `/drv-unload` patch ret stub 才能卸载。
+4. **vgk64.sys (Valorant Vanguard)**：packed，静态分析无法看到完整逻辑，但确认有 DKOM 和 APC 注入能力。
+5. **krestore64.sys**：虽是磁盘还原驱动，但有 EPROCESS DKOM 写入能力和 MmGetSystemRoutineAddress 动态解析，不排除辅助保护功能。
 
 ---
 

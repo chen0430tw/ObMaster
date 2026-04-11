@@ -1716,15 +1716,20 @@ ren C:\path\to\kshut.dll   kshut.dll.bak
 
 ### 各驱动角色总结
 
-| 驱动 | 真实职能 | 对 VBox 的威胁 |
-|------|---------|---------------|
-| ksafecenter64.sys | ObCallback 进程保护 + LoadImage notify + CmCallback | L1/L2/L3（已全部绕过）；CmCallback 仍活跃（evil handle 来源）|
-| **kshutdown64.sys** | **APC 注入 kshut64.dll 杀非白名单进程** | **L4（kshut64.dll 已中和）** |
-| **kboot64.sys** | **启动时 PnP 硬件配置 + 网络设置 + CmCallback** | **CmCallback 可能是另一个 evil handle 来源；服务名 `kboot`** |
-| kcachec64.sys | PsSetCreateProcessNotifyRoutine + 线程创建 | 待分析 |
-| kpowershutdown64.sys | 电源/关机控制（猜测） | 无直接威胁 |
-| kantiarp64.sys | ARP 防火墙 | 无直接威胁 |
-| kdisk64.sys / krestore64.sys / kscsidisk64.sys | 磁盘影子还原 | 无直接威胁 |
+> ppm-engine v0.2.2 静态分析验证，2026-04-11（PC44 网咖实机）
+
+| 驱动 | ppm 类型 | 真实职能 | 对 VBox 的威胁 |
+|------|---------|---------|---------------|
+| ksafecenter64.sys | `protection_minifilter` | ObCallback 进程保护 + CmCallback 注册表保护 + ImageLoad notify + Minifilter；无 DriverUnload | L1/L2/L3（已全部绕过）；CmCallback 仅拦截注册表写入，**不是 evil handle 来源**（逆向已证伪）|
+| **kshutdown64.sys** | `apc_injector` | APC 注入 kshut64.dll 杀非白名单进程；Process/ImageLoad notify；无 DriverUnload；MmGetSystemRoutineAddress 动态解析 | **L4（kshut64.dll 已中和）** |
+| **kboot64.sys** | `apc_injector` | PnP 硬件配置 + 网络设置 + **CmCallback + APC 注入 + EPROCESS DKOM**；无 DriverUnload；服务名 `kboot` | **高 — APC 注入能力 + CmCallback 可能是 evil handle 来源** |
+| vgk64.sys | `apc_injector` (packed) | Valorant Vanguard 反作弊；EPROCESS DKOM；无 DriverUnload | 中 — ObCallback 干扰 VBox handle |
+| kcachec64.sys | `process_monitor` | PsSetCreateProcessNotifyRoutine 进程监控；无 DriverUnload；MmGetSystemRoutineAddress | 中 — 进程监控，可能上报或辅助 kshutdown |
+| KScsiDisk64.sys | `process_monitor` | SCSI 磁盘过滤 + Process/ImageLoad notify；无 DriverUnload；MmGetSystemRoutineAddress | 低（磁盘驱动但有进程监控） |
+| krestore64.sys | `generic_driver` | 磁盘影子还原；无 DriverUnload；MmGetSystemRoutineAddress；**EPROCESS DKOM** | 低（有 DKOM 能力） |
+| kdisk64.sys | `generic_driver` | 磁盘控制；无 DriverUnload | 无 |
+| kantiarp64.sys | `generic_driver` | ARP 防火墙；无 DriverUnload | 无 |
+| kpowershutdown64.sys | `generic_driver` | 电源/关机控制；无 DriverUnload | 无 |
 
 ---
 
