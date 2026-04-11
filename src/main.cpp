@@ -92,6 +92,7 @@ static void Usage(const char* prog) {
     H("/rd64 <addr> [n]",                 "Read QWORDs from kernel VA");
     H("/wr64 <addr> <value>",             "Write QWORD to kernel VA");
     H("/ptebase  /ptebase-set <val>",     "MmPteBase discovery / manual override");
+    H("/bsod [path|--list|--all]",        "Analyze BSOD dump (--after 3d --before yd)");
     printf("\n");
 
     printf("  %sPrivilege & Elevation%s\n", A_BOLD, A_RESET);
@@ -722,6 +723,21 @@ int main(int argc, char* argv[]) {
         }
         DWORD64 val = strtoull(valStr, nullptr, 16);
         SetMmPteBase(val);
+    }
+    else if (_stricmp(cmd, "bsod") == 0) {
+        // /bsod [path.dmp | --list | --all] [--after 3d] [--before yd]
+        const char* arg1 = nullptr;
+        const char* afterSpec = nullptr;
+        const char* beforeSpec = nullptr;
+        for (int k = cmdIdx + 1; k < argc; k++) {
+            const char* a = argv[k];
+            if (a[0] == '/' && strlen(a) > 1 && a[1] != '-') break; // next command
+            if (_stricmp(a, "--after") == 0 && k+1 < argc)  { afterSpec = argv[++k]; continue; }
+            if (_stricmp(a, "--before") == 0 && k+1 < argc) { beforeSpec = argv[++k]; continue; }
+            if (!arg1 && strcmp(a, "?") != 0) arg1 = a;
+        }
+        CmdBsod(arg1, afterSpec, beforeSpec);
+        return 0;
     }
     else if (_stricmp(cmd, "drv-unload") == 0) {
         const char* name  = nextArg(0);

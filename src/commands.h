@@ -67,3 +67,6 @@ void CmdInjScan(DWORD pid);                                 // /inj-scan [pid]
 void CmdKillPpl(DWORD pid);                                 // /kill-ppl <pid>
 void CmdMakePpl(DWORD pid, BYTE level);                     // /make-ppl <pid> [level]
 void CmdObcbInstall(const char* sysPath);                   // /obcb-install [path]
+void CmdBsod(const char* dumpPath = nullptr,
+             const char* afterSpec = nullptr,
+             const char* beforeSpec = nullptr);              // /bsod [path|--list|--all] [--after 3d] [--before yd]
