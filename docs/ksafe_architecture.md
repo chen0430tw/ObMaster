@@ -474,6 +474,16 @@ Evil handle 是 ObOpenObjectByPointer -> ZwClose 之间的瞬态竞态产物。
 ```
 CmCallback @ 0x7C20 只拦截 RegNtPreSetValueKey, 保护 `\SOFTWARE\kSafeCenter`。
 
+**CmCallback 存储结构（Win10 19041+ 重要发现）：**
+
+Win10 19041+ 的 CmCallback 存储在 `nt!CallbackListHead` **链表**中，
+不是旧版的 `CmpCallBackVector` 固定数组。ObMaster `/notify registry` 同时
+使用数组扫描和链表遍历，自动合并结果。
+
+第六次实战（2026-04-12）确认：数组模式只找到 FLTMGR，链表模式额外找到
+WdFilter、UCPD、mfehidk、ksafecenter64、ntoskrnl 共 5 个回调。
+ksafecenter64 的 CmCallback 在链表 node[3]，fn=+0x7C20，与 kd.exe 输出一致。
+
 **ObOpenObjectByPointer 完整调用链:**
 ```
 sub_78B8 (PreOp) -> sub_7600 (IsProtectedPid) -> sub_4BCC -> ObOpenObjectByPointer
