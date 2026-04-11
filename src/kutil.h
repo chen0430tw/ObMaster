@@ -29,6 +29,8 @@ DWORD64 FindDriverByAddr(DWORD64 addr, const wchar_t** outName, DWORD64* outOffs
 // ─── EPROCESS walker (reads kernel memory directly, no OpenProcess) ───────────
 // Win10 22H2 (19045) x64 EPROCESS offsets
 // Verified against: dt nt!_EPROCESS (WinDbg 10.0.26100)
+// Cross-verified: ppm-engine v0.2.1 (2026-04-11) dkom.py + dataflow.py
+//   ksafecenter64.sys uses 0x440/0x448/0x5a8 in IsProtectedPid (confirmed)
 static const DWORD EP_UniqueProcessId            = 0x440;
 static const DWORD EP_ActiveProcessLinks         = 0x448; // LIST_ENTRY
 static const DWORD EP_InheritedFromUniqueProcessId = 0x540; // PPID

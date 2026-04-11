@@ -13,6 +13,14 @@
 
 // ─── /handles [drive|path] [--close] ─────────────────────────────────────────
 // Enumerate all open file handles system-wide.
+//
+// ⚠️ Evil handle note (ppm-engine v0.2.1 cross-verification, 2026-04-11):
+//   ksafecenter64.sys ObOpenObjectByPointer uses DesiredAccess=0x200
+//   (PROCESS_QUERY_LIMITED_INFORMATION), NOT 0x1FFFFF (ALL_ACCESS).
+//   Evil handles seen by VBoxSup are TRANSIENT race-condition artifacts:
+//     ObOpenObjectByPointer(0x200) -> ZwQueryInformationProcess -> ZwClose
+//   The handle only exists during the ~microsecond query window.
+//   /handle-close targeting persistent 0x1FFFFF handles will NOT catch these.
 // Filter modes:
 //   "E" or "E:"             → all handles on that volume
 //   "C:\path\to\dir"        → handles whose NT path starts with that prefix

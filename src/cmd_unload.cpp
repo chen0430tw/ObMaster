@@ -7,6 +7,11 @@
 //
 // Get <drvobj_va> from WinDbg:  !object \Driver\<name>
 //
+// ppm-engine v0.2.1 verification (2026-04-11):
+//   ALL 9 ksafe drivers confirmed to have NO DriverUnload export.
+//   RTCore64.sys also has no DriverUnload.
+//   -> /force-stop with ret stub patch is the only viable unload path.
+//
 // DRIVER_OBJECT layout (x64 Win10):
 //   +0x000 Type/Size     : 0x01500004
 //   +0x008 DeviceObject  : ptr

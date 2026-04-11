@@ -362,6 +362,22 @@ void CmdNotifyDisable(unsigned long long targetFn) {
 // RIP-relative LEA pointing into ntoskrnl .data.
 //
 // To kill an entry: zero the EX_CALLBACK slot — kernel skips NULL on walk.
+//
+// ⚠️ KNOWN ISSUE (2026-04-10 session_backup):
+//   FindCmpCallBackVector() may find the wrong array — the address found via
+//   CmUnRegisterCallback LEA scan matched a dispatch table, not the real
+//   CmpCallBackVector. Evidence: repeating stride-8 ntoskrnl addresses,
+//   UTF-16 strings in slots, fn first-byte not valid x64 prologues.
+//   The real CmpCallBackVector may be a CM_CALLBACK_ENTRY linked list,
+//   not a flat EX_CALLBACK[100] array.
+//
+// ppm-engine v0.2.1 cross-verification (2026-04-11):
+//   ksafecenter64.sys CmRegisterCallbackEx @ 0x7A47:
+//     callback function = 0x7C20 (RegNtPreSetValueKey handler)
+//     protects: \Registry\Machine\SOFTWARE\kSafeCenter
+//   kboot64.sys also has CmCallback (cm_callback conf=0.85 @ 0x1853F)
+//   -> If array scan fails, fallback: search loaded driver address ranges
+//      for known CmCallback function offsets from ppm static analysis.
 
 #define CM_ARRAY_MAX  100
 

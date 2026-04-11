@@ -25,6 +25,11 @@
 //   +0x020  ObjectType    : QWORD
 //   +0x028  PreOperation  : QWORD  (function pointer, our main target)
 //   +0x030  PostOperation : QWORD  (function pointer)
+//
+// Cross-verified by ppm-engine v0.2.1 (2026-04-11):
+//   ksafecenter64.sys: ObRegisterCallbacks @ sub_74FC, PreOp handler @ +0x78B8
+//   dataflow: ObOpenObjectByPointer DesiredAccess=0x200 (QUERY_INFO only)
+//   -> evil handles are transient race artifacts, NOT persistent 0x1FFFFF handles
 
 #define OBJ_TYPE_CALLBACKLIST  0x0C8
 #define OBE_OPERATIONS         0x010
@@ -78,12 +83,24 @@ static std::vector<ObEntry> ScanType(const char* label, DWORD64 typeVarAddr) {
 // Returns true if driver name looks like a non-Microsoft security/game product
 static bool IsSuspiciousDriver(const wchar_t* name) {
     if (!name) return false;
-    static const wchar_t* known_ms[] = {
-        L"ntoskrnl.exe", L"hal.dll", L"WdFilter.sys", L"CI.dll",
-        L"ksecdd.sys",   L"cng.sys", L"VerifierExt.sys", nullptr
+    // Known legitimate drivers (Microsoft + security products)
+    // Verified by ppm-engine v0.2.1 analysis (2026-04-11)
+    static const wchar_t* known_legit[] = {
+        // Microsoft
+        L"ntoskrnl.exe", L"hal.dll", L"WdFilter.sys", L"WdNisDrv.sys",
+        L"CI.dll", L"ksecdd.sys", L"cng.sys", L"VerifierExt.sys",
+        L"FLTMGR.SYS", L"cldflt.sys", L"storport.sys",
+        // McAfee (10 drivers, ppm: all generic_driver/minifilter, no attack patterns)
+        L"mfeaack.sys", L"mfeavfk.sys", L"mfeclnrk.sys", L"mfeelamk.sys",
+        L"mfefirek.sys", L"mfehidk.sys", L"mfencbdc.sys", L"mfencrk.sys",
+        L"mfeplk.sys", L"mfewfpk.sys",
+        // Anti-cheat (legitimate but aggressive)
+        L"vgk.sys",      // Valorant Vanguard
+        L"EasyAntiCheat.sys",
+        nullptr
     };
-    for (int i = 0; known_ms[i]; i++)
-        if (_wcsicmp(name, known_ms[i]) == 0) return false;
+    for (int i = 0; known_legit[i]; i++)
+        if (_wcsicmp(name, known_legit[i]) == 0) return false;
     return true;
 }
 

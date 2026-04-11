@@ -13,6 +13,14 @@
 //   • Minifilter / IoRegisterFsRegistrationChange still attached
 //   • Open handles to a DeviceObject (DeviceObject.ReferenceCount > 0)
 //   • ObRegisterCallbacks registration still live
+//
+// ppm-engine v0.2.1 confirmed (2026-04-11):
+//   ksafecenter64.sys zombie mechanism:
+//     - No DriverUnload (NULL at +0x68)
+//     - DKOM: removed from PsLoadedModuleList (hides from EnumDeviceDrivers)
+//     - DeviceObject \Device\SafeCenter + \Device\SFFireWall hold refs
+//     - ObCallback + CmCallback registrations hold additional refs
+//     - FltRegisterFilter minifilter instance holds frame ref
 //   • Pending IRPs keeping a DeviceObject alive
 
 #define NOMINMAX
