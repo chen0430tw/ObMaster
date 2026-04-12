@@ -202,26 +202,67 @@ ObMaster /nuke-driver <服务名> <DRIVER_OBJECT地址>
 **核心洞察：** 云更新是商业软件，有安装就有卸载。厂商不可能手动操作内核结构来卸载自己的驱动。
 驱动内部有 IOCTL 控制通道，厂商的卸载程序通过 DeviceIoControl 通知驱动自清理。
 
-```bash
-# 方法 1：通过驱动自己的 IOCTL 通道（推荐）
-#   驱动设备名：
-#     ksafecenter64 → \\.\SafeCenter
-#     KScsiDisk64   → \\.\KScsiDisk
-#   kscdrv64.dll（B:\lwclient64\）是用户态通信库，导出 SafeCenterStart
+**驱动内部清理路径（ppm 逆向确认）：**
 
-# 从 kscdrv64.dll 提取的 IOCTL 序列（ppm dataflow）：
-#   初始化:  0x220019
+ksafecenter64.sys 内部有完整的清理函数，但 DriverUnload 是空壳不调它们：
+
+| 函数 RVA | 清理操作 | 调用的内核 API |
+|----------|---------|---------------|
+| `0x7894` | 清除 ObCallback | `ObUnRegisterCallbacks` |
+| `0x7958` | 跳转到 0x7894 | （thunk） |
+| `0x69FC` | 清除 ImageNotify | `PsRemoveLoadImageNotifyRoutine(0x6FAC)` |
+| `0x15A8` 错误路径 | 删除设备 | `IoDeleteDevice`（用全局存的 DevObj 指针） |
+
+DriverEntry (`0x1458`) 的失败回退路径会按逆序调这些清理函数。
+**IOCTL 通道的目标：找到触发这些清理路径的 IOCTL code。**
+
+**实战操作步骤：**
+
+```bash
+# ── 步骤 1：确认设备可访问 ──
+# 驱动设备名（ppm strings 提取）：
+#   ksafecenter64 → \\.\SafeCenter 和 \\.\SFFireWall
+#   KScsiDisk64   → \\.\KScsiDisk
+
+# 用 PowerShell 测试设备是否可打开：
+powershell -Command "[IO.File]::Open('\\.\SafeCenter','Open','Read','ReadWrite').Close()"
+# 如果报错"Access Denied" → 用 ObMaster /runas system 提权
+# 如果报错"Not Found" → 驱动未创建设备（实验机常见，服务器上正常）
+
+# ── 步骤 2：发送 IOCTL 探测 ──
+# 从 kscdrv64.dll 提取的 IOCTL 序列（ppm dataflow + pseudo）：
+#   初始化:  0x220019（传模块路径，SafeCenterStart 主入口调用）
 #   控制:    0x22000C, 0x220014, 0x220024, 0x220028
 #   进程:    0x220004, 0x220008, 0x220010
 #   后续:    0x22002C, 0x220030, 0x220034
-#   异步:    0x17003D, 0x12083D
+#   异步:    0x17003D, 0x12083D, 0x120894
 
-# 待验证：哪个 IOCTL 触发驱动自清理（ObUnRegister + PsRemove + IoDeleteDevice）
-# 验证方法：在服务器上依次发送 IOCTL，观察 /notify 和 /obcb 变化
+# 用 PowerShell 逐个发 IOCTL 并观察效果：
+$h = [IO.File]::Open('\\.\SafeCenter','Open','Read','ReadWrite')
+# 对每个 IOCTL code：
+#   DeviceIoControl($h, $code, $null, 0, $null, 0, [ref]$ret, [IntPtr]::Zero)
+#   然后检查：
+#     ObMaster /notify registry  → CmCallback 是否消失
+#     ObMaster /notify image     → ImageNotify 是否消失
+#     ObMaster /obcb             → ObCallback 是否消失
+#     ObMaster /drv-zombie <drvobj>  → DeviceObject 数量是否减少
+$h.Close()
 
-# 方法 2：直接运行厂商的卸载工具（如果有）
-#   检查 B:\lwclient64\ 下是否有 uninstall.exe 或类似工具
-#   检查注册表 HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall 下的云更新条目
+# ── 步骤 3：找到清理 IOCTL 后 ──
+# 驱动自己清理完所有注册后：
+sc stop ksafecenter          # 或 NtUnloadDriver
+# 应该能干净卸载（MmUnloadSystemImage 释放文件锁）
+
+# ── 步骤 4：验证 ──
+sc start ksafecenter          # 能重新加载 = 干净卸载成功
+```
+
+**方法 2：直接运行厂商的卸载工具**
+```bash
+# 检查 B 盘（需要 SYSTEM 权限）：
+ObMaster /runas system cmd /c "dir B:\lwclient64\*uninstall* B:\lwclient64\tools\*"
+# 检查注册表卸载条目：
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" /s | findstr -i "yungenxin\|lwclient\|ksafe\|cloud"
 ```
 
 **为什么 IOCTL 通道是唯一正确方案：**
