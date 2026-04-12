@@ -799,7 +799,7 @@ void CmdNukeDriver(const char* svcName, DWORD64 drvObjVA) {
                        A_GREEN, A_RESET);
                 printf("    Code pages freed, file lock released, driver can be reloaded.\n");
             } else {
-                printf("    %s[!] NtUnloadDriver failed: 0x%08X%s\n", A_YELLOW, A_RESET, (unsigned)st);
+                printf("    %s[!] NtUnloadDriver failed: 0x%08X%s\n", A_YELLOW, (unsigned)st, A_RESET);
                 if (st == (NTSTATUS)0xC0000010)
                     printf("    STATUS_INVALID_DEVICE_REQUEST — kernel still refuses.\n"
                            "    Driver is functionally dead (callbacks/devices cleaned) but code pages remain.\n"
