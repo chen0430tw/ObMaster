@@ -559,7 +559,7 @@ void sub_3110() {
 | safepatch DriverUnload → C3 | patch 成功但 sc stop 仍然 1052 |
 | **`/nuke-driver <drvobj>`** | **✅ 成功——驱动功能性死亡** |
 
-### /nuke-driver 验证结果
+### /nuke-driver 验证（v1 — PsLoadedModuleList 摘链版，已废弃）
 
 ```
 [*] /nuke-driver  DRIVER_OBJECT=0xFFFFDC81AAC19BB0
@@ -572,9 +572,51 @@ void sub_3110() {
 [5] Zeroing DriverUnload...                       [+] → NULL
 [6] Unlinking from PsLoadedModuleList...          [+] 已摘链
 [*] nuke-driver complete — kscsidisk64.sys is functionally dead.
-
-验证：/drivers 输出中 kscsidisk64 已消失 ✅
 ```
+
+**结果：** 驱动从 /drivers 消失但 BSOD 0x50（PsLoadedModuleList 竞态）。**v1 已废弃。**
+
+### /nuke-driver 验证（v2 — NtUnloadDriver 版，当前版本）
+
+**ksafecenter64 测试（重启后干净状态）：**
+
+nuke 前状态：
+- CmCallback: ✅ 有（+0x7C20）
+- ImageNotify: ✅ 有（+0x6FAC）
+- DriverUnload: NULL
+- DeviceObject: 2 个
+- PointerCount: 4（2 body + 2 device）
+
+```
+[1] Scanning Ps*NotifyRoutine arrays...
+    [+] Removed ImageNotify slot[6] fn=0xFFFFF80084346FAC
+[2] Scanning CmCallback linked list...            (CallbackListHead 未找到)
+[3] Clearing DeviceObject chain...
+    [+] DevObj[0]: PointerCount 2 → 1
+    [+] DevObj[1]: PointerCount 2 → 1
+    [+] Zeroed DeviceObject head (2 device(s) cleaned)
+[4] Redirecting MajorFunction[0..27] to ret stub...  [+]
+[5] Setting DriverUnload to ret stub...               [+]
+[6] Calling NtUnloadDriver("ksafecenter")...
+    [+] NtUnloadDriver succeeded — driver fully unloaded
+```
+
+**NtUnloadDriver 返回 SUCCESS** ✅ — 清理回调 + DeviceObject 引用计数后前置检查通过。
+
+**但文件仍锁着** ❌ — MmUnloadSystemImage 没执行：
+- `Copy-Item ksafecenter64.sys` → "being used by another process"
+- `/drivers` 仍显示 Stopped
+- `sc start ksafecenter` → Error 2（无法重新加载）
+
+**根因分析：**
+- 手动减 DeviceObject PointerCount（2→1）并清零 DriverObject->DeviceObject 指针
+- NtUnloadDriver 看到空链 → 返回 SUCCESS → 调 DriverUnload（ret stub）
+- 但 DeviceObject 本身还存在（PointerCount=1 ≠ 0），成了孤儿
+- 内核没有执行 IopDeleteDevice → MmUnloadSystemImage 被跳过
+- 代码页仍映射，文件锁未释放
+
+**结论：手动操作内核结构做不到干净卸载。NtUnloadDriver 的 SUCCESS 是假象——
+它只表示"DriverUnload 被调用了"，不代表"驱动被完全卸载了"。**
 
 ### safepatch 验证结果
 
