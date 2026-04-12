@@ -185,29 +185,55 @@ ObMaster /drv-unload <驱动名> <DRIVER_OBJECT地址>
 # 步骤 5. 重试 force-stop（DriverUnload 已被 patch）
 ObMaster /force-stop <驱动名> --force
 
-# 步骤 6. 如果仍然失败 → 终极手段 /nuke-driver
-#   直接在内核层面清除所有注册、断开所有引用、从模块列表摘链
-ObMaster /nuke-driver <DRIVER_OBJECT地址>
+# 步骤 6. 如果仍然失败 → /nuke-driver（功能性杀死，重启后消失）
+ObMaster /nuke-driver <服务名> <DRIVER_OBJECT地址>
+
+# 步骤 7. 真正的干净卸载 → IOCTL 通道（推荐，见下方）
 ```
 
-**`/nuke-driver` 做了什么（7 步）：**
+**⚠ /nuke-driver 的局限：**
+- NtUnloadDriver 返回 SUCCESS，但 MmUnloadSystemImage **不会执行**
+- 文件锁不释放，驱动**无法重新加载**（直到重启）
+- 原因：DeviceObject 成了孤儿，内核等待引用清零但没人调 IoDeleteDevice
+- **nuke-driver 只适合"杀死功能 + 等重启"的场景，不能做到卸载后立即重装**
 
-| 步骤 | 操作 | 目的 |
-|------|------|------|
-| 1 | 扫描 Ps*NotifyRoutine 数组，清零驱动范围内的 entry | 移除 Process/Image/Thread 回调 |
-| 2 | 遍历 CallbackListHead 链表，unlink 驱动范围内的节点 | 移除 CmCallback |
-| 3 | 清零 DriverObject->DeviceObject 链 | 断开设备引用 |
-| 4 | MajorFunction[0..27] 全部指向 ntoskrnl ret stub | 阻止 IRP 派发 |
-| 5 | 清零 DriverUnload | 防止双重调用 |
-| 6 | 从 PsLoadedModuleList 摘链 | 驱动从 /drivers 消失 |
-| 7 | 报告清理数量 | — |
+### 正确的卸载方式：IOCTL 通道（厂商自己的后门）
 
-**注意：** 代码页仍驻留内存（内核不做 MmUnloadSystemImage），但驱动功能性死亡——
-没有回调、没有设备、没有 IRP 处理、不在模块列表中。重启后彻底消失。
+**核心洞察：** 云更新是商业软件，有安装就有卸载。厂商不可能手动操作内核结构来卸载自己的驱动。
+驱动内部有 IOCTL 控制通道，厂商的卸载程序通过 DeviceIoControl 通知驱动自清理。
 
-**典型用途：** KScsiDisk64.sys 这类 DriverUnload 是空壳（`return;` 不做任何清理）的驱动。
-NtUnloadDriver 调完空壳后发现回调和设备还挂着，无法释放 → 僵尸。/nuke-driver 绕过 NtUnloadDriver，
-直接在内核层面做 DriverUnload 该做的事。
+```bash
+# 方法 1：通过驱动自己的 IOCTL 通道（推荐）
+#   驱动设备名：
+#     ksafecenter64 → \\.\SafeCenter
+#     KScsiDisk64   → \\.\KScsiDisk
+#   kscdrv64.dll（B:\lwclient64\）是用户态通信库，导出 SafeCenterStart
+
+# 从 kscdrv64.dll 提取的 IOCTL 序列（ppm dataflow）：
+#   初始化:  0x220019
+#   控制:    0x22000C, 0x220014, 0x220024, 0x220028
+#   进程:    0x220004, 0x220008, 0x220010
+#   后续:    0x22002C, 0x220030, 0x220034
+#   异步:    0x17003D, 0x12083D
+
+# 待验证：哪个 IOCTL 触发驱动自清理（ObUnRegister + PsRemove + IoDeleteDevice）
+# 验证方法：在服务器上依次发送 IOCTL，观察 /notify 和 /obcb 变化
+
+# 方法 2：直接运行厂商的卸载工具（如果有）
+#   检查 B:\lwclient64\ 下是否有 uninstall.exe 或类似工具
+#   检查注册表 HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall 下的云更新条目
+```
+
+**为什么 IOCTL 通道是唯一正确方案：**
+
+| 方案 | 结果 |
+|------|------|
+| `sc stop` | 1052 — 驱动不接受 STOP |
+| `NtUnloadDriver` | 0xC0000010 — DriverUnload 空壳 |
+| `/force-stop` + ret stub | NtUnloadDriver SUCCESS 但文件仍锁 |
+| `/nuke-driver` | 功能性死亡但文件锁不放，无法重装 |
+| PsLoadedModuleList 摘链 | BSOD 0x50（竞态） |
+| **IOCTL → 驱动自清理** | **驱动自己调 IoDeleteDevice → MmUnloadSystemImage → 干净卸载** |
 
 **Phase 2 完成后，测试 VBox：**
 ```bash
