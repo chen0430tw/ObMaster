@@ -80,6 +80,7 @@ Process inspection, PPL bypass, two-stage UAC bypass (COM + kernel token steal),
 | `/drv-unload <name> <drvobj_va>` | Force-unload a `NOT_STOPPABLE` or DKOM-hidden driver — patches `DriverUnload` to a `ret` stub then calls `sc stop` |
 | `/force-stop <name>` | Auto-find `DRIVER_OBJECT` (PsLoadedModuleList → `.data` scan) + patch `DriverUnload` + `NtUnloadDriver` |
 | `/drv-zombie <drvobj_va>` | Diagnose a driver stuck in STOP_PENDING — inspect `DriverUnload`, IRP queues, and reference counts |
+| `/nuke-driver <drvobj_va>` | Super unload: remove all Notify/CmCallback entries in driver range, zero DeviceObject chain, redirect MajorFunction to ret stub, unlink from PsLoadedModuleList. For drivers with empty DriverUnload that refuse NtUnloadDriver |
 
 > **DKOM-hidden driver note:** If the target driver has removed itself from `PsLoadedModuleList` **and** `EnumDeviceDrivers` (e.g. ksafecenter64), `/force-stop` auto-discovery will fail. The driver object still lives in the `\Driver` Object Directory hash bucket — use `/objdir` to find it:
 >

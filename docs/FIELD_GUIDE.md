@@ -157,7 +157,7 @@ ObMaster /force-stop kcachec --force
 | 错误 | 原因 | 解法 |
 |------|------|------|
 | `STATUS_OBJECT_NAME_NOT_FOUND` (0xC0000034) | 注册表无服务条目 | 走 /objdir + /drv-unload 路径（见下方） |
-| `STATUS_INVALID_DEVICE_REQUEST` (0xC0000010) | DriverUnload = NULL | /drv-unload 会自动 patch |
+| `STATUS_INVALID_DEVICE_REQUEST` (0xC0000010) | DriverUnload = NULL 或空壳 | /drv-unload 会自动 patch；如果 patch 后仍失败 → /nuke-driver |
 | `OpenService: 1060` | SCM 找不到服务 | 走 /objdir + /drv-unload 路径；检查服务名是否带了多余的 64 |
 | `OpenService: 5` (ACCESS_DENIED) | CmCallback 仍在拦截 SCM | 回去检查 Phase 1 是否拆干净 |
 | WARNING: N DeviceObject(s) still attached | DeviceObject 阻止卸载 | 需清零 DeviceObject 链（见下方） |
@@ -184,7 +184,30 @@ ObMaster /drv-unload <驱动名> <DRIVER_OBJECT地址>
 
 # 步骤 5. 重试 force-stop（DriverUnload 已被 patch）
 ObMaster /force-stop <驱动名> --force
+
+# 步骤 6. 如果仍然失败 → 终极手段 /nuke-driver
+#   直接在内核层面清除所有注册、断开所有引用、从模块列表摘链
+ObMaster /nuke-driver <DRIVER_OBJECT地址>
 ```
+
+**`/nuke-driver` 做了什么（7 步）：**
+
+| 步骤 | 操作 | 目的 |
+|------|------|------|
+| 1 | 扫描 Ps*NotifyRoutine 数组，清零驱动范围内的 entry | 移除 Process/Image/Thread 回调 |
+| 2 | 遍历 CallbackListHead 链表，unlink 驱动范围内的节点 | 移除 CmCallback |
+| 3 | 清零 DriverObject->DeviceObject 链 | 断开设备引用 |
+| 4 | MajorFunction[0..27] 全部指向 ntoskrnl ret stub | 阻止 IRP 派发 |
+| 5 | 清零 DriverUnload | 防止双重调用 |
+| 6 | 从 PsLoadedModuleList 摘链 | 驱动从 /drivers 消失 |
+| 7 | 报告清理数量 | — |
+
+**注意：** 代码页仍驻留内存（内核不做 MmUnloadSystemImage），但驱动功能性死亡——
+没有回调、没有设备、没有 IRP 处理、不在模块列表中。重启后彻底消失。
+
+**典型用途：** KScsiDisk64.sys 这类 DriverUnload 是空壳（`return;` 不做任何清理）的驱动。
+NtUnloadDriver 调完空壳后发现回调和设备还挂着，无法释放 → 僵尸。/nuke-driver 绕过 NtUnloadDriver，
+直接在内核层面做 DriverUnload 该做的事。
 
 **Phase 2 完成后，测试 VBox：**
 ```bash

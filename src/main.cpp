@@ -77,6 +77,7 @@ static void Usage(const char* prog) {
     H("/drv-unload <name> <drvobj_va>",   "Force-unload (patch DriverUnload + sc stop)");
     H("/force-stop <name>",               "NtUnloadDriver (bypass SCM error 1052)");
     H("/drv-zombie <drvobj_va>",          "Diagnose zombie driver refcount");
+    H("/nuke-driver <svc> <drvobj_va>",   "Super unload: clean callbacks/devices, then NtUnloadDriver");
     H("/flt [drive]",                     "Minifilter instances (kernel walk)");
     H("/flt-detach <filter> <drive>",     "Force-detach mandatory minifilter");
     H("/unmount <drive>",                 "Force dismount + eject volume");
@@ -1033,6 +1034,18 @@ int main(int argc, char* argv[]) {
         DWORD64 va = strtoull(vaStr, nullptr, 16);
         KUtil::BuildDriverCache();
         CmdDrvZombie(va);
+    }
+    else if (_stricmp(cmd, "nuke-driver") == 0) {
+        const char* svcStr = nextArg(0);
+        const char* vaStr  = nextArg(1);
+        if (!svcStr || !vaStr) {
+            printf("[!] Usage: /nuke-driver <service_name> <drvobj_va>\n"
+                   "    Super unload: clean all callbacks/devices, then NtUnloadDriver.\n"
+                   "    service_name: registry key name (e.g. KScsiDisk, not KScsiDisk64)\n"
+                   "    drvobj_va:    from ObMaster /objdir --kva <Driver_dir_KVA>\n");
+            g_drv->Close(); return 1;
+        }
+        CmdNukeDriver(svcStr, strtoull(vaStr, nullptr, 16));
     }
     else if (_stricmp(cmd, "objdir") == 0) {
         const char* dirPath = nextArg(0);

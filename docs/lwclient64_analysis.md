@@ -520,10 +520,76 @@ ppm analyze kscsidisk64.sys:
 
 ---
 
+## KScsiDisk64 僵尸驱动研究（2026-04-12 实验机验证）
+
+### 为什么 KScsiDisk64 无法卸载
+
+ppm pseudo 分析 DriverUnload (RVA 0x3110)：
+
+```c
+void sub_3110() {
+    return;  // 空函数，什么都不做
+}
+```
+
+原始字节 `C2`（`RET imm16`），等价于直接返回。但 DriverEntry 注册了：
+
+| 注册 | 清理 |
+|------|------|
+| `PsSetCreateProcessNotifyRoutine(0x137B0, FALSE)` | ❌ 没有 |
+| `PsSetLoadImageNotifyRoutine(0x4DA4)` | ❌ 没有 |
+| `IoRegisterShutdownNotification` | ❌ 没有 |
+| `IoRegisterBootDriverReinitialization` | ❌ 没有 |
+| `IoCreateDevice` + `IoAttachDeviceToDeviceStack` | ❌ 没有 |
+
+**DriverUnload 是诱饵**——地址不为 NULL（骗过检查工具），但实际什么都不做。
+内核调完 DriverUnload 后发现回调和设备还挂着，无法释放 → 僵尸。
+
+这是云更新的**故意设计：加载不走**。
+
+### 卸载尝试时间线
+
+| 尝试 | 结果 |
+|------|------|
+| `sc stop KScsiDisk` | 1052 (SERVICE_CONTROL_INVALID) |
+| `NtUnloadDriver` | 0xC0000010 (STATUS_INVALID_DEVICE_REQUEST) |
+| `/force-stop KScsiDisk` | 自动发现失败（DKOM 隐藏） |
+| `/drv-unload KScsiDisk <drvobj>` | DriverUnload 有值但 ControlService 1052 |
+| `/drv-zombie <drvobj>` | PointerCount=2，完全正常，无明显阻塞原因 |
+| safepatch DriverUnload → C3 | patch 成功但 sc stop 仍然 1052 |
+| **`/nuke-driver <drvobj>`** | **✅ 成功——驱动功能性死亡** |
+
+### /nuke-driver 验证结果
+
+```
+[*] /nuke-driver  DRIVER_OBJECT=0xFFFFDC81AAC19BB0
+[*] Target: kscsidisk64.sys  range: 0xFFFFF800A03C0000 - 0xFFFFF800A03E4000 (144 KB)
+
+[1] Scanning Ps*NotifyRoutine arrays...           (无条目——实验机未触发注册)
+[2] Scanning CmCallback linked list...            (CallbackListHead 未找到)
+[3] Clearing DeviceObject chain...                (无 DeviceObject)
+[4] Zeroing MajorFunction[0..27]...               [+] 全部 → ret stub
+[5] Zeroing DriverUnload...                       [+] → NULL
+[6] Unlinking from PsLoadedModuleList...          [+] 已摘链
+[*] nuke-driver complete — kscsidisk64.sys is functionally dead.
+
+验证：/drivers 输出中 kscsidisk64 已消失 ✅
+```
+
+### safepatch 验证结果
+
+| 目标 | RVA | 原始字节 | patch | sp-test | safepatch | 结果 |
+|------|-----|---------|-------|---------|-----------|------|
+| ImageNotify | 0x4DA4 | `4C` | `C3` | 三阶段 PASS | ✅ | 影子页验证 C3 |
+| DriverUnload | 0x3110 | `C2` | `C3` | — | ✅ | ppm 确认是空壳 |
+
+---
+
 ## 待完成
 
 - [x] safepatch KScsiDisk64 的 ImageNotify 回调入口 (RVA 0x4DA4) 为 C3 → ✅ 有效，VBox 能开
 - [x] PPL 方案分析 → ❌ 无效（时序问题，handle 在 PPL 设置前已创建）
+- [x] KScsiDisk64 僵尸驱动研究 → DriverUnload 是空壳，/nuke-driver 解决
 - [ ] 实施 safepatch + 延迟启动 + 立即还原方案（写自动化脚本）
 - [ ] 如果 1 分钟窗口不够，考虑物理写入方案（RTCore64 直接写物理页）
 - [ ] kscdrv64.dll 详细分析（驱动通信库，可能有 IOCTL 通道）

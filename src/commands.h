@@ -44,6 +44,7 @@ void CmdPte(DWORD64 va, bool setWrite = false,               // /pte <addr> [--s
             DWORD64 restoreVal = 0);                        //              [--restore <val>]
 void CmdForceUnload(const char* drvName, DWORD64 drvObjVA); // /drv-unload <name> <drvobj_va>
 void CmdForceStop(const char* svcName, bool force = false); // /force-stop <name> [--force]
+void CmdNukeDriver(const char* svcName, DWORD64 drvObjVA);      // /nuke-driver <svc> <drvobj_va>
 void CmdElevatePid(DWORD targetPid);                        // /elevate-pid <pid>
 void CmdElevateSelf(const char* extraCmd);                  // /elevate-self [cmd]
 void CmdEnablePriv(const char* privName);                   // /enable-priv <privilege>
