@@ -281,6 +281,20 @@ void CmdSpTest(DWORD64 addr) {
     printf("%s[sp-test]%s  Safepatch diagnostic — target 0x%016llX\n",
            A_CYAN, A_RESET, addr);
 
+    // Reject PTE self-map region — sp-test Stage 3 does PTE swap,
+    // which on a page table page would corrupt all mappings → instant BSOD.
+    DWORD64 pteBase = GetMmPteBase();
+    if (pteBase && addr >= pteBase && addr < pteBase + 0x8000000000ULL) {
+        printf("\n  %s[!] ABORT: target 0x%016llX is inside the PTE self-map region%s\n"
+               "      (MmPteBase=0x%016llX .. 0x%016llX)\n"
+               "      This is a PAGE TABLE page — PTE swap would corrupt all mappings.\n"
+               "      This would cause an immediate BSOD.\n",
+               A_RED, (unsigned long long)addr, A_RESET,
+               (unsigned long long)pteBase,
+               (unsigned long long)(pteBase + 0x8000000000ULL - 1));
+        return;
+    }
+
     const wchar_t* drvName = nullptr; DWORD64 drvOff = 0;
     KUtil::BuildDriverCache();
     KUtil::FindDriverByAddr(addr, &drvName, &drvOff);

@@ -33,6 +33,7 @@ public:
     }
 
     void    Wr8 (DWORD64 a, BYTE    v) { WritePrim(a, 1, v);                    }
+    void    Wr16(DWORD64 a, WORD    v) { WritePrim(a, 2, v);                    }
     void    Wr32(DWORD64 a, DWORD   v) { WritePrim(a, 4, v);                    }
     void    Wr64(DWORD64 a, DWORD64 v) { Wr32(a, (DWORD)(v & 0xFFFFFFFF));
                                          Wr32(a+4, (DWORD)(v >> 32));           }

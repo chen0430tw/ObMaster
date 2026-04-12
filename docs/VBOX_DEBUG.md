@@ -2681,8 +2681,175 @@ p9rdr.sys 是受害者——它执行注册表操作时触发了内核的 CmCall
 |------|------|--------|
 | CmCallback --kill 链表 BSOD | ✅ | 已修复（LIST_ENTRY unlink，commit 4c70007） |
 | CmCallback 定位失败 | ✅ | 已修复（IsValidPrologue 放宽 + CallbackListHead 链表遍历） |
-| ProcessNotify `<unknown>` 归属不明 | ⚠️ | 确认是否为云更新驱动 |
-| Phase 2 未执行 | 🔄 | 卸载 ksafecenter64/kshutdown64/kboot64/kcachec64 |
-| Phase 3 未执行 | 🔄 | 卸载非保护驱动（可选） |
-| VBox 启动 | ❌ | 逐 Phase 测试，观察 exit 时间变化 |
+| ProcessNotify `<unknown>` 归属不明 | ✅ | 确认为 stale entry（0x06 非法指令），非云更新驱动 |
+| Phase 2 | ✅ | ksafecenter/kshutdown/kboot 卸载成功；kcachec 拒绝（次要） |
+| Phase 3 | ✅ | kdisk 卸载成功；krestore/KScsiDisk 拒绝（磁盘驱动，DeviceObject 引用） |
+| VBox 启动 | ❌ | evil handle 仍存在，见下方续 |
+
+---
+
+### 第六次实战续（Phase 2/3 执行 + 全面中和）
+
+#### Phase 2：卸载保护驱动
+
+**关键发现：** 服务名不带 64。`/force-stop ksafecenter64` 失败（STATUS_OBJECT_NAME_NOT_FOUND），
+`/force-stop ksafecenter` 成功。`\Driver` 对象名也不带 64。
+
+| 驱动文件 | 服务名 | /force-stop 结果 |
+|----------|--------|-----------------|
+| ksafecenter64.sys | `ksafecenter` | ✅ Driver unloaded successfully |
+| kshutdown64.sys | `kshutdown` | ✅ Driver unloaded successfully |
+| kboot64.sys | `kboot` | ✅ Driver unloaded successfully |
+| kcachec64.sys | `kcachec` | ❌ STATUS_INVALID_DEVICE_REQUEST（DriverUnload 拒绝 stop） |
+
+#### Phase 3：卸载非保护驱动
+
+| 驱动文件 | 服务名 | 结果 |
+|----------|--------|------|
+| kdisk64.sys | `kdisk` | ✅ 卸载成功 |
+| krestore64.sys | `krestore` | ❌ ControlService 1052（15 个 DeviceObject） |
+| KScsiDisk64.sys | `KScsiDisk` | ❌ ControlService 1052（5 个 DeviceObject） |
+| kantiarp64.sys | — | 未加载 |
+| kpowershutdown64.sys | — | 未加载 |
+
+#### WdFilter 处理
+
+| 操作 | 结果 |
+|------|------|
+| Defender 排除规则（/runas system reg add） | ✅ 写入成功 |
+| WdFilter ObCallback PreOp 清零 | ✅ Disabled |
+| WdFilter LoadImage notify 清零 (+0x3ce80) | ✅ Disabled |
+| WdFilter Thread notify [0] 清零 (+0x3da50) | ✅ Disabled |
+| WdFilter Thread notify [1] 清零 (+0x3d830) | ✅ Disabled |
+
+#### vgk.sys（Valorant Vanguard）处理
+
+| 操作 | 结果 |
+|------|------|
+| ObCallback PreOp 清零 (Process + Thread) | ✅ Disabled |
+| LoadImage notify 清零 (+0xbee4) | ✅ Disabled |
+| /force-stop vgk | ✅ Driver unloaded successfully |
+
+#### kshutdown64 APC 注入中和
+
+| 操作 | 结果 |
+|------|------|
+| kshut64.dll 文件重命名（System32 + SysWOW64） | ✅ 三个文件全部 .bak |
+| kshut64.dll 从 winlogon.exe 卸载（/wluninject） | ✅ FreeLibrary 成功 |
+| /wlmon 确认 winlogon 无 kshut64.dll | ✅ 已消失 |
+
+#### 云更新用户态进程中和
+
+| 进程 | 路径 | 操作 |
+|------|------|------|
+| lwclient64.exe | B:\lwclient64\ | ✅ 文件重命名 + 进程终止 |
+| kssd.exe | B:\lwclient64\ | ✅ 文件重命名 + 进程终止 |
+| lwhardware64.exe | B:\lwclient64\ | ✅ 文件重命名 + 进程终止 |
+
+杀进程后不再重生（可执行文件已重命名）。
+
+#### 云更新驱动文件重命名
+
+```
+C:\Windows\System32\drivers\ksafecenter64.sys → .bak
+C:\Windows\System32\drivers\kshutdown64.sys → .bak
+C:\Windows\System32\drivers\kboot64.sys → .bak
+C:\Windows\System32\drivers\kcachec64.sys → .bak
+```
+
+---
+
+### 当前状态总结
+
+| 层 | 内容 | 状态 |
+|----|------|------|
+| ksafecenter CmCallback | /notify registry --kill | ✅ 已拆 |
+| kboot CmCallback | /notify registry --kill | ✅ 已拆 |
+| ksafecenter ObCallback | /disable PreOp | ✅ 已禁用 |
+| WdFilter ObCallback | /disable PreOp | ✅ 已禁用 |
+| vgk ObCallback | /disable PreOp | ✅ 已禁用 + 驱动卸载 |
+| ksafecenter ImageNotify | /ndisable +0x6fac | ✅ 已清零 |
+| kshutdown ImageNotify | /ndisable +0x2ef8 | ✅ 已清零 |
+| WdFilter ImageNotify | /ndisable +0x3ce80 | ✅ 已清零 |
+| WdFilter Thread notify ×2 | /ndisable | ✅ 已清零 |
+| vgk ImageNotify | /ndisable +0xbee4 | ✅ 已清零 |
+| ProcessNotify | 无云更新条目 | ✅ 已确认 |
+| MiniFilter | ksafecenter 未挂载 | ✅ 不需处理 |
+| ksafecenter64.sys | /force-stop ksafecenter | ✅ 已卸载 |
+| kshutdown64.sys | /force-stop kshutdown | ✅ 已卸载 |
+| kboot64.sys | /force-stop kboot | ✅ 已卸载 |
+| kcachec64.sys | /force-stop kcachec | ❌ 拒绝卸载（次要） |
+| kshut64.dll 文件 | 重命名 .bak | ✅ 中和 |
+| kshut64.dll in winlogon | /wluninject | ✅ 已卸载 |
+| 云更新用户态进程 | 文件重命名 + 杀进程 | ✅ 已中和 |
+| 驱动 .sys 文件 | 重命名 .bak | ✅ 防重载 |
+| **evil handle** | pid=4 PROCESS_ALL_ACCESS | **❌ 仍存在** |
+| **VBox 启动** | exit 0xc0000409 ~3200-3700ms | **❌ 未达成** |
+
+### 进一步排查
+
+#### WdFilter 完全停止
+
+```
+ObMaster /runas system "net stop WdFilter /y"
+sc query WdFilter → STATE: 1 STOPPED
+```
+
+结果：✅ WdFilter 完全停止。evil handle 仍存在 — **WdFilter 不是来源**。
+
+#### 剩余云更新驱动卸载尝试
+
+kcachec64、krestore64、KScsiDisk64 三个驱动仍在内存（kcachec Stopped，另外两个活跃）。
+尝试手动 `/wr64` 将 DriverUnload 覆盖为 ret stub（0xFFFFF8077B602660），再 `/force-stop`：
+
+| 驱动 | DRIVER_OBJECT+0x68 | /wr64 | /force-stop 结果 |
+|------|-------------------|-------|-----------------|
+| kcachec | 0xFFFF988CB9F5CE78 | ✅ 写入成功 | ❌ STATUS_INVALID_DEVICE_REQUEST（DeviceObject 引用阻止） |
+| krestore | 0xFFFF988CB995E4E8 | ✅ 写入成功 | ❌ 同上（15 个 DeviceObject） |
+| KScsiDisk | 0xFFFF988CB9CE0D78 | ✅ 写入成功 | ❌ 同上（5 个 DeviceObject） |
+
+**根因：** NtUnloadDriver → IopUnloadDriver 在 DeviceObject 引用计数不为零时，
+在调用 DriverUnload 之前就返回 STATUS_INVALID_DEVICE_REQUEST。ret stub patch 无效。
+
+#### Notify 回调排查
+
+`/debug /notify process` 详细输出确认：所有 bad entry 均指向 ntoskrnl 范围或垃圾数据，
+无任何条目指向 KScsiDisk64（0xFFFFF80781E80000）或 kcachec64（0xFFFFF80782720000）地址范围。
+
+`/notify image` 仅剩 ahcache.sys（系统组件）。
+
+**结论：KScsiDisk64 和 kcachec64 的 Process/Image notify 未在当前环境中注册。**
+ppm 静态分析显示它们有注册能力，但实际运行时可能未执行注册（依赖服务端配置或特定条件）。
+
+---
+
+### 未解问题
+
+**所有已知的云更新内核回调、驱动、用户态进程、DLL 注入均已中和，
+WdFilter 已完全停止，所有 Notify 数组中无云更新条目，
+但 evil handle (pid=4, acc=0x1fffff) 仍在每次 VBox 启动时出现。**
+
+**已排除的来源：**
+- ksafecenter64 ObCallback — 已禁用
+- ksafecenter64 CmCallback — 已 unlink
+- ksafecenter64/kshutdown64 ImageNotify — 已清零
+- kboot64 CmCallback — 已 unlink
+- WdFilter ObCallback/ImageNotify/ThreadNotify — 已禁用 + 服务停止
+- vgk.sys — 已完全卸载
+- kshutdown64 — 已卸载 + kshut64.dll 中和
+- 云更新用户态进程 — 已终止 + 文件重命名
+- ProcessNotify 数组 — 无云更新条目（debug 确认）
+- ImageNotify 数组 — 仅 ahcache.sys
+
+**可能的残留来源：**
+1. **kcachec64/krestore64/KScsiDisk64 代码仍驻留内存**，虽然 Notify 数组中无条目，
+   但可能通过非标准路径（内部线程、定时器等）在进程创建时开 handle
+2. **Windows 内核自身行为** — 进程创建时 System 默认获得 ALL_ACCESS handle，
+   VBoxSup hardening 将其视为 evil（第五次实战的逆向分析结论支持此假设）
+3. **其他第三方驱动** — cpuz160_x64.sys、OpenHardwareMonitorLib.sys
+
+### 下一步方案
+
+1. **`/make-ppl`**：给 VBox 进程设置 PPL 保护，阻止 System 对其开 ALL_ACCESS handle
+2. **`/handle-scan 4 --target-pid <vboxpid> --close --spin`**：在 VBox 启动时实时关闭 evil handle
 

@@ -286,3 +286,9 @@ Windows 限制:      Home 128GB / Pro 2TB  （许可证限制）
 
 大学不教这些。考研不考这些。网上几乎没人讨论这些。
 **但一个打不开的 VirtualBox 会逼你全学会。**
+
+---
+
+## 延伸阅读
+
+- [人类用了30年内存条，快"死了"吗？](https://www.bilibili.com/video/BV1CaDsBNEqs) — AI 需求推动内存涨价，CAMM 可能取代传统 DIMM 内存条

@@ -2590,6 +2590,21 @@ bool IsLargePage(DWORD64 va) {
 //   MmPteBase scan results. Its code pages are on 2MB large pages.
 //   Attempting WritePte on large pages or with wrong MmPteBase = BSOD.
 bool PteSafetyCheck(DWORD64 targetVA) {
+    // 0. Reject addresses in the PTE self-mapping region (512GB starting at MmPteBase).
+    //    These are page table pages — swapping their physical backing corrupts all
+    //    virtual-to-physical mappings that pass through them → instant BSOD.
+    {
+        DWORD64 base = GetMmPteBase();
+        if (base && targetVA >= base && targetVA < base + 0x8000000000ULL) {
+            printf("%s[!]%s PteSafetyCheck FAILED: target 0x%016llX is inside the PTE self-map region\n"
+                   "    (MmPteBase=0x%016llX .. 0x%016llX).\n"
+                   "    This is a PAGE TABLE page — PTE swap would corrupt all mappings through it.\n"
+                   "    This operation would cause an immediate BSOD.\n",
+                   A_RED, A_RESET, targetVA, base, base + 0x8000000000ULL - 1);
+            return false;
+        }
+    }
+
     // 1. Validate MmPteBase itself
     if (!ValidateMmPteBase()) {
         printf("%s[!]%s PteSafetyCheck FAILED: MmPteBase is contaminated.\n"

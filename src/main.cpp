@@ -95,10 +95,19 @@ static void Usage(const char* prog) {
     H("/pte <addr> [flags]",              "Walk 4-level page table; --set-write --clear-nx --restore");
     H("/v2p <va>",                        "Virtual address → physical address");
     H("/p2v <pa>",                        "Physical address → virtual address (driver scan)");
-    H("/rd64 <addr> [n]",                 "Read QWORDs from kernel VA");
-    H("/wr64 <addr> <value>",             "Write QWORD to kernel VA");
     H("/ptebase [--method N]",            "MmPteBase discovery (N=1-12 for specific method)");
     H("/ptebase-set <val>",               "Manual MmPteBase override");
+    printf("\n");
+
+    printf("  %sRaw Read / Write%s  (addr/value in hex, e.g. FFFFF803781D0000)\n", A_BOLD, A_RESET);
+    H("/rd8 <addr> [n]",                  "Hex dump (1 byte/cell, 16/line + ASCII, default n=64)");
+    H("/rd16 <addr> [n]",                 "Read 2-byte integers (WORD, 16-bit)");
+    H("/rd32 <addr> [n]",                 "Read 4-byte integers (DWORD, 32-bit)");
+    H("/rd64 <addr> [n]",                 "Read 8-byte integers (QWORD, 64-bit, pointer size)");
+    H("/wr8 <addr> <value>",              "Write 1 byte  (PTE writable check, --force to skip)");
+    H("/wr16 <addr> <value>",             "Write 2 bytes (PTE writable check, --force to skip)");
+    H("/wr32 <addr> <value>",             "Write 4 bytes (PTE writable check, --force to skip)");
+    H("/wr64 <addr> <value>",             "Write 8 bytes (PTE writable check, --force to skip)");
     printf("\n");
 
     printf("  %sDiagnostics%s\n", A_BOLD, A_RESET);
@@ -288,6 +297,27 @@ static bool TryCommandHelp(const char* cmd) {
         );
         return true;
     }
+    if (_stricmp(cmd, "rd8") == 0) {
+        printf(
+            "/rd8 <addr> [count] — hex dump bytes from a kernel virtual address\n\n"
+            "  Reads raw bytes and displays in traditional hex dump format (16 bytes/line + ASCII).\n\n"
+            "  Arguments:\n"
+            "    addr    kernel VA in hex (e.g. fffff8086a000000)\n"
+            "    count   number of bytes to read (default 64, max 4096)\n\n"
+            "  See also: /rd16, /rd32, /rd64, /wr8, /wr16, /wr32, /wr64\n"
+        );
+        return true;
+    }
+    if (_stricmp(cmd, "rd16") == 0) {
+        printf("/rd16 <addr> [count] — read 1-256 WORDs from a kernel VA\n\n"
+               "  Arguments: addr (hex), count (default 1, max 256)\n");
+        return true;
+    }
+    if (_stricmp(cmd, "rd32") == 0) {
+        printf("/rd32 <addr> [count] — read 1-256 DWORDs from a kernel VA\n\n"
+               "  Arguments: addr (hex), count (default 1, max 256)\n");
+        return true;
+    }
     if (_stricmp(cmd, "rd64") == 0) {
         printf(
             "/rd64 <addr> [count] — read 1-256 QWORDs from a kernel virtual address\n\n"
@@ -299,6 +329,21 @@ static bool TryCommandHelp(const char* cmd) {
             "  Output: one line per QWORD:  0x<addr>  =  0x<value>\n\n"
             "  See also: /wr64 (write), /pte (decode page-table entry)\n"
         );
+        return true;
+    }
+    if (_stricmp(cmd, "wr8") == 0) {
+        printf("/wr8 <addr> <value> — write a byte to a kernel VA\n\n"
+               "  WARNING: Writing to arbitrary kernel addresses can cause BSOD.\n");
+        return true;
+    }
+    if (_stricmp(cmd, "wr16") == 0) {
+        printf("/wr16 <addr> <value> — write a WORD to a kernel VA\n\n"
+               "  WARNING: Writing to arbitrary kernel addresses can cause BSOD.\n");
+        return true;
+    }
+    if (_stricmp(cmd, "wr32") == 0) {
+        printf("/wr32 <addr> <value> — write a DWORD to a kernel VA\n\n"
+               "  WARNING: Writing to arbitrary kernel addresses can cause BSOD.\n");
         return true;
     }
     if (_stricmp(cmd, "wr64") == 0) {
@@ -694,10 +739,59 @@ int main(int argc, char* argv[]) {
         }
         CmdPte(strtoull(addrStr, nullptr, 16), setWrite, clearNx, restoreVal);
     }
+    else if (_stricmp(cmd, "rd8") == 0) {
+        // Hex dump bytes from a kernel VA.
+        // Usage: /rd8 <addr> [count]
+        const char* addrStr  = nextArg(0);
+        const char* countStr = nextArg(1);
+        if (!addrStr) { printf("[!] Usage: /rd8 <hex_addr> [count]\n"); g_drv->Close(); return 1; }
+        DWORD64 addr  = strtoull(addrStr, nullptr, 16);
+        DWORD   count = countStr ? (DWORD)strtoul(countStr, nullptr, 10) : 64;
+        if (count == 0 || count > 4096) count = 64;
+        for (DWORD off = 0; off < count; off += 16) {
+            BYTE line[16]{};
+            DWORD lineLen = (count - off < 16) ? (count - off) : 16;
+            for (DWORD b = 0; b < lineLen; b++)
+                line[b] = g_drv->Rd8(addr + off + b);
+            printf("0x%016llX  ", (unsigned long long)(addr + off));
+            for (DWORD b = 0; b < 16; b++) {
+                if (b < lineLen) printf("%02X ", line[b]);
+                else             printf("   ");
+                if (b == 7) printf(" ");
+            }
+            printf(" |");
+            for (DWORD b = 0; b < lineLen; b++)
+                printf("%c", (line[b] >= 0x20 && line[b] < 0x7F) ? line[b] : '.');
+            printf("|\n");
+        }
+    }
+    else if (_stricmp(cmd, "rd16") == 0) {
+        const char* addrStr  = nextArg(0);
+        const char* countStr = nextArg(1);
+        if (!addrStr) { printf("[!] Usage: /rd16 <hex_addr> [count]\n"); g_drv->Close(); return 1; }
+        DWORD64 addr  = strtoull(addrStr, nullptr, 16);
+        DWORD   count = countStr ? (DWORD)strtoul(countStr, nullptr, 10) : 1;
+        if (count == 0 || count > 256) count = 1;
+        for (DWORD i = 0; i < count; i++) {
+            DWORD64 va  = addr + (DWORD64)i * 2;
+            WORD    val = g_drv->Rd16(va);
+            printf("0x%016llX  =  0x%04X\n", (unsigned long long)va, val);
+        }
+    }
+    else if (_stricmp(cmd, "rd32") == 0) {
+        const char* addrStr  = nextArg(0);
+        const char* countStr = nextArg(1);
+        if (!addrStr) { printf("[!] Usage: /rd32 <hex_addr> [count]\n"); g_drv->Close(); return 1; }
+        DWORD64 addr  = strtoull(addrStr, nullptr, 16);
+        DWORD   count = countStr ? (DWORD)strtoul(countStr, nullptr, 10) : 1;
+        if (count == 0 || count > 256) count = 1;
+        for (DWORD i = 0; i < count; i++) {
+            DWORD64 va  = addr + (DWORD64)i * 4;
+            DWORD   val = g_drv->Rd32(va);
+            printf("0x%016llX  =  0x%08X\n", (unsigned long long)va, val);
+        }
+    }
     else if (_stricmp(cmd, "rd64") == 0) {
-        // Read one or more QWORDs from a kernel VA via RTCore64.
-        // Usage: /rd64 <addr> [count]
-        // count defaults to 1; each QWORD printed on its own line.
         const char* addrStr  = nextArg(0);
         const char* countStr = nextArg(1);
         if (!addrStr) { printf("[!] Usage: /rd64 <hex_addr> [count]\n"); g_drv->Close(); return 1; }
@@ -707,21 +801,55 @@ int main(int argc, char* argv[]) {
         for (DWORD i = 0; i < count; i++) {
             DWORD64 va  = addr + (DWORD64)i * 8;
             DWORD64 val = g_drv->Rd64(va);
-            printf("0x%016llX  =  0x%016llX\n", va, val);
+            printf("0x%016llX  =  0x%016llX\n", (unsigned long long)va, (unsigned long long)val);
         }
     }
-    else if (_stricmp(cmd, "wr64") == 0) {
-        const char* addrStr  = nextArg(0);
-        const char* valStr   = nextArg(1);
+    // ── Write commands: all check PTE writable first ───────────────────────
+    // Writing to a read-only kernel page (e.g. .text, PE header) causes
+    // BSOD 0xBE (ATTEMPTED_WRITE_TO_READONLY_MEMORY).  Use /safepatch for
+    // code patches — it does a shadow-page PTE swap to bypass read-only.
+    else if (_stricmp(cmd, "wr8") == 0 || _stricmp(cmd, "wr16") == 0 ||
+             _stricmp(cmd, "wr32") == 0 || _stricmp(cmd, "wr64") == 0) {
+        const char* addrStr = nextArg(0);
+        const char* valStr  = nextArg(1);
         if (!addrStr || !valStr) {
-            printf("[!] Usage: /wr64 <hex_addr> <hex_value>\n");
+            printf("[!] Usage: /%s <hex_addr> <hex_value>\n", cmd);
             g_drv->Close(); return 1;
         }
         DWORD64 addr = strtoull(addrStr, nullptr, 16);
         DWORD64 val  = strtoull(valStr,  nullptr, 16);
-        bool atomic = g_drv->Wr64Atomic(addr, val);
-        printf("[+] Wr64 0x%016llX <- 0x%016llX  (%s)\n",
-               addr, val, atomic ? "ATOMIC 8B" : "hi-lo fallback");
+
+        // PTE writable check
+        PteInfo pte = ReadPte(addr);
+        if (pte.valid && !pte.writable) {
+            printf("%s[!] ABORT: page at 0x%016llX is READ-ONLY (PTE=0x%016llX, W=0)%s\n"
+                   "    Writing to read-only kernel memory causes BSOD 0xBE.\n"
+                   "    Use /safepatch for code patches (shadow-page PTE swap).\n"
+                   "    Use /wr%s --force to override this check.\n",
+                   A_RED, (unsigned long long)addr, (unsigned long long)pte.pte_val, A_RESET, cmd + 2);
+            // Check for --force flag
+            bool force = false;
+            for (int i = cmdIdx + 1; i < argc; i++)
+                if (_stricmp(argv[i], "--force") == 0) { force = true; break; }
+            if (!force) { g_drv->Close(); return 1; }
+            printf("%s[!] --force: proceeding with write to read-only page%s\n", A_YELLOW, A_RESET);
+        }
+
+        if (_stricmp(cmd, "wr8") == 0) {
+            g_drv->Wr8(addr, (BYTE)val);
+            printf("[+] Wr8  0x%016llX <- 0x%02X\n", (unsigned long long)addr, (unsigned)((BYTE)val));
+        } else if (_stricmp(cmd, "wr16") == 0) {
+            g_drv->Wr16(addr, (WORD)val);
+            printf("[+] Wr16 0x%016llX <- 0x%04X\n", (unsigned long long)addr, (unsigned)((WORD)val));
+        } else if (_stricmp(cmd, "wr32") == 0) {
+            g_drv->Wr32(addr, (DWORD)val);
+            printf("[+] Wr32 0x%016llX <- 0x%08X\n", (unsigned long long)addr, (unsigned)((DWORD)val));
+        } else {
+            bool atomic = g_drv->Wr64Atomic(addr, val);
+            printf("[+] Wr64 0x%016llX <- 0x%016llX  (%s)\n",
+                   (unsigned long long)addr, (unsigned long long)val,
+                   atomic ? "ATOMIC 8B" : "hi-lo fallback");
+        }
     }
     else if (_stricmp(cmd, "v2p") == 0) {
         const char* addrStr = nextArg();

@@ -2,7 +2,7 @@
 
 > BYOVD-powered kernel toolkit — see what System Informer can't.
 >
-> 60 commands across 8 categories: recon, callbacks, handles, drivers, memory/PTE, diagnostics, privilege escalation, and winlogon.
+> 68 commands across 9 categories: recon, callbacks, handles, drivers, memory/PTE, raw read/write, diagnostics, privilege escalation, and winlogon.
 
 Process inspection, PPL bypass, two-stage UAC bypass (COM + kernel token steal), kernel code patching via shadow-page PTE swap, 12-method MmPteBase discovery, VA↔PA translation, privilege escalation, service/driver enumeration, network state, ObRegisterCallbacks management, CmCallback/Ps\*NotifyRoutine enumeration/disable, handle enumeration/suppression, minifilter inspection/detach, BSOD dump analysis, and force USB eject — all via RTCore64.sys (CVE-2019-16098).
 
@@ -117,8 +117,22 @@ Process inspection, PPL bypass, two-stage UAC bypass (COM + kernel token steal),
 | `/p2v <pa>` | Reverse lookup: physical address → virtual address (scans all loaded drivers) |
 | `/ptebase [--method N]` | Run all 12 MmPteBase discovery methods; `--method N` runs only method N |
 | `/ptebase-set <val>` | Manually override the cached `MmPteBase` value |
-| `/rd64 <addr> [count]` | Raw kernel QWORD read |
-| `/wr64 <addr> <val>` | Raw kernel QWORD write |
+### Raw Read / Write
+
+All addresses and values are in hexadecimal. The number suffix is the **bit width**: 8 = 1 byte, 16 = 2 bytes (WORD), 32 = 4 bytes (DWORD), 64 = 8 bytes (QWORD / pointer).
+
+| Command | Description |
+|---|---|
+| `/rd8 <addr> [count]` | Hex dump (1 byte/cell, 16 per line + ASCII column). Default count = 64, max 4096 |
+| `/rd16 <addr> [count]` | Read 2-byte (16-bit) integers. Default count = 1, max 256 |
+| `/rd32 <addr> [count]` | Read 4-byte (32-bit) integers. Useful for EPROCESS flags, Protection byte, etc. |
+| `/rd64 <addr> [count]` | Read 8-byte (64-bit) integers. Pointers, PTE values, tokens |
+| `/wr8 <addr> <value>` | Write 1 byte. Checks PTE writable — aborts on read-only pages to prevent BSOD 0xBE. Use `--force` to override |
+| `/wr16 <addr> <value>` | Write 2 bytes. Same PTE writable check |
+| `/wr32 <addr> <value>` | Write 4 bytes. Same PTE writable check |
+| `/wr64 <addr> <value>` | Write 8 bytes. Attempts atomic 8-byte write; falls back to hi-lo DWORD pair. Same PTE writable check |
+
+> **⚠ Write commands vs /safepatch:** `/wr*` writes directly to the virtual address — the page **must** be writable (e.g. `.data` section, pool allocations, EPROCESS fields). For patching read-only code pages (`.text`), use `/safepatch` which does a shadow-page PTE swap to bypass the read-only protection.
 
 ### BSOD Diagnosis
 | Command | Description |
@@ -420,13 +434,16 @@ Each array entry is an `EX_CALLBACK` (`EX_FAST_REF`). Decoding: `block = value &
 
 ### PTE safety checks
 
-`/pte --set-write`, `/safepatch`, and related PTE operations run `PteSafetyCheck()` before any write:
+`/pte --set-write`, `/safepatch`, `/sp-test`, and related PTE operations run `PteSafetyCheck()` before any write:
 
+0. **PTE self-map region reject** — if target VA is in `[MmPteBase, MmPteBase+512GB)`, abort immediately. These are page table pages — PTE swap would corrupt all virtual-to-physical mappings → instant BSOD.
 1. **`ValidateMmPteBase()`** — reads PTE of ntoskrnl base, verifies Present + Executable. If flags don't match, MmPteBase is contaminated (DKOM interference).
 2. **`IsLargePage()`** — checks PDE.PS bit. 2MB large pages have no PTE layer; `ReadPte`/`WritePte` would read garbage.
 3. **DKOM driver warning** — if target VA belongs to ksafecenter64, kboot64, or kshutdown64, warns that PTE operations may be unreliable.
 
-This prevents the BSOD scenarios (0x50, 0xBE) that occurred when `/safepatch` was used on DKOM-hidden drivers with contaminated MmPteBase or large page code.
+`/wr8`, `/wr16`, `/wr32`, `/wr64` check PTE writable bit before writing — aborts on read-only pages (BSOD 0xBE prevention). Use `--force` to override.
+
+This prevents the BSOD scenarios (0x50, 0xBE, 0x3B) that occurred when PTE operations targeted DKOM-hidden drivers, large pages, page table pages, or read-only memory.
 
 ### MmPteBase discovery (12 methods)
 
