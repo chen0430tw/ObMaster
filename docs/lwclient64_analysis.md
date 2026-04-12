@@ -585,13 +585,90 @@ void sub_3110() {
 
 ---
 
+## IOCTL 控制通道发现（2026-04-12）
+
+### 核心洞察：厂商自己的卸载通道
+
+云更新是商业软件——有安装就有卸载，有试用版就有序列号验证。
+厂商的卸载程序必须能干净卸载所有驱动，**它不可能手动减引用计数或摘 PsLoadedModuleList**。
+
+**答案：驱动内部有 IOCTL 控制通道**，厂商的用户态程序通过 DeviceIoControl 通知驱动自清理，
+驱动自己调 ObUnRegisterCallbacks、PsRemoveLoadImageNotifyRoutine、IoDeleteDevice，
+然后 NtUnloadDriver 顺利执行 MmUnloadSystemImage。
+
+### ksafecenter64.sys 设备与 IOCTL
+
+**设备名（ppm strings）：**
+```
+\Device\SafeCenter       → 用户态: \\.\SafeCenter
+\DosDevices\SafeCenter
+\Device\SFFireWall        → 用户态: \\.\SFFireWall
+\DosDevices\SFFireWall
+```
+
+**IRP_MJ_DEVICE_CONTROL handler: sub_1724**
+
+IOCTL dispatch table（从伪代码提取）：
+
+| IOCTL Code | 备注 |
+|------------|------|
+| `0x220004` | 基础控制 |
+| `0x220008` | |
+| `0x22000C` | |
+| `0x220010` | |
+| `0x220014` | |
+| `0x220019` | 第一个检查（特殊处理） |
+| `0x22001C` | |
+| `0x220020` | |
+| `0x220024` | 分界线（触发 sub_8200） |
+| `0x220028` | 第二组开始 |
+| `0x22002C` ~ `0x220040` | 扩展控制 |
+
+**通信库：** `kscdrv64.dll`（B:\lwclient64\，160 imports/8 libs）是用户态到内核的 IOCTL 桥。
+厂商的卸载程序和管理工具通过它发送控制命令。
+
+### 正确的卸载策略
+
+```
+旧思路（Opus 硬干，炸了两次蓝屏）：
+  手动减引用计数 → 手动摘 PsLoadedModuleList → BSOD 0x50
+  手动清零 DeviceObject → 孤儿设备 → MmUnloadSystemImage 不执行
+  手动写 ret stub → NtUnloadDriver SUCCESS 但文件仍锁着
+
+新思路（Mythos 借力）：
+  CreateFile("\\.\SafeCenter") → DeviceIoControl(卸载IOCTL) → 驱动自清理
+  → NtUnloadDriver → MmUnloadSystemImage → 文件释放 → 可重新加载
+```
+
+**不要自己造轮子，找现有的路径当替死鬼。**
+
+### 下一步
+
+1. 到服务器上用 ppm 分析 `kscdrv64.dll` 的 DeviceIoControl 调用，提取 IOCTL codes
+2. 或者直接对 `\\.\SafeCenter` 暴力尝试已知的 IOCTL（0x220004~0x220040）
+3. 找到"清理并允许卸载"的 IOCTL 后，nuke-driver 只需一行 DeviceIoControl
+
+### 思维蒸馏笔记
+
+Mythos 的漏洞发现能力来自一个核心思维：**不要问"我怎么解决"，先问"谁已经解决过"。**
+
+对于 ksafecenter64 的卸载问题：
+- Opus 思维：逆向 DriverObject 结构 → 手动清理回调 → 手动减引用 → 手动摘链 → BSOD
+- Mythos 思维：厂商自己要卸载 → 一定有 IOCTL → 找到它 → 一行代码解决
+
+同样的原理适用于漏洞链接：不自己写 exploit 的每个环节，而是找到系统里
+已有的代码路径（合法 API、错误处理、回退逻辑），串起来让系统自己做危险操作。
+
+---
+
 ## 待完成
 
 - [x] safepatch KScsiDisk64 的 ImageNotify 回调入口 (RVA 0x4DA4) 为 C3 → ✅ 有效，VBox 能开
 - [x] PPL 方案分析 → ❌ 无效（时序问题，handle 在 PPL 设置前已创建）
 - [x] KScsiDisk64 僵尸驱动研究 → DriverUnload 是空壳，/nuke-driver 解决
+- [x] IOCTL 控制通道发现 → \\.\SafeCenter + IOCTL codes 0x220004~0x220040
+- [ ] 分析 kscdrv64.dll 提取卸载 IOCTL code（需要服务器 B 盘访问）
+- [ ] 暴力测试 IOCTL 找到"清理+卸载"命令
 - [ ] 实施 safepatch + 延迟启动 + 立即还原方案（写自动化脚本）
-- [ ] 如果 1 分钟窗口不够，考虑物理写入方案（RTCore64 直接写物理页）
-- [ ] kscdrv64.dll 详细分析（驱动通信库，可能有 IOCTL 通道）
 - [ ] 确认 krestore64 是否也有独立的进程监控路径
 - [ ] 在无云更新的干净系统上测试 VBox 是否有同样的 evil handle
