@@ -78,6 +78,8 @@ static void Usage(const char* prog) {
     H("/force-stop <name>",               "NtUnloadDriver (bypass SCM error 1052)");
     H("/drv-zombie <drvobj_va>",          "Diagnose zombie driver refcount");
     H("/nuke-driver <svc> <drvobj_va>",   "Super unload: clean callbacks/devices, then NtUnloadDriver");
+    H("/pnp-remove <hwid>",               "PnP device removal (like devcon remove / pnputil)");
+    H("/pnp-list [pattern]",              "List PnP devices (optional HWID/instance filter)");
     H("/flt [drive]",                     "Minifilter instances (kernel walk)");
     H("/flt-detach <filter> <drive>",     "Force-detach mandatory minifilter");
     H("/unmount <drive>",                 "Force dismount + eject volume");
@@ -466,10 +468,14 @@ int main(int argc, char* argv[]) {
     g_drv = &rtcore;
 
     if (!g_drv->Open()) {
-        // /elevate-self does not need the driver — allow it through
+        // Commands that don't need the driver — allow through
         if (cmd && _stricmp(cmd, "elevate-self") == 0) {
             CmdElevateSelf("");
             return 0;
+        }
+        if (cmd && (_stricmp(cmd, "pnp-remove") == 0 || _stricmp(cmd, "pnp-list") == 0)) {
+            g_drv = nullptr;
+            goto dispatch;
         }
         if (g_jsonMode)
             printf("{\"error\":\"Cannot open %s (err %lu)\"}\n", g_drv->Name(), GetLastError());
@@ -496,6 +502,7 @@ int main(int argc, char* argv[]) {
     };
 
     // ── Dispatch ──────────────────────────────────────────────────────────────
+    dispatch:
     if (_stricmp(cmd, "proc") == 0) {
         CmdProc();
     }
@@ -1046,6 +1053,22 @@ int main(int argc, char* argv[]) {
             g_drv->Close(); return 1;
         }
         CmdNukeDriver(svcStr, strtoull(vaStr, nullptr, 16));
+    }
+    else if (_stricmp(cmd, "pnp-remove") == 0) {
+        const char* pat = nextArg(0);
+        if (!pat) {
+            printf("[!] Usage: /pnp-remove <hwid_or_pattern>\n"
+                   "    Remove PnP devices matching pattern (like devcon remove).\n"
+                   "    Example: /pnp-remove kscsidiskadapter\n");
+            if (g_drv) g_drv->Close(); return 1;
+        }
+        CmdPnpRemove(pat);
+        if (g_drv) g_drv->Close(); return 0;
+    }
+    else if (_stricmp(cmd, "pnp-list") == 0) {
+        const char* pat = nextArg(0);
+        CmdPnpList(pat ? pat : "");
+        if (g_drv) g_drv->Close(); return 0;
     }
     else if (_stricmp(cmd, "objdir") == 0) {
         const char* dirPath = nextArg(0);

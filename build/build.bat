@@ -47,6 +47,7 @@ cl.exe /nologo /O2 /MT /EHsc /std:c++17 /utf-8 ^
     "%SRC%\cmd_objdir.cpp" ^
     "%SRC%\cmd_winlogon.cpp" ^
     "%SRC%\cmd_bsod.cpp" ^
+    "%SRC%\cmd_pnp.cpp" ^
     "%SRC%\cmd_misc.cpp" ^
     /Fe:"%OUT%" ^
     /link advapi32.lib psapi.lib iphlpapi.lib ws2_32.lib fltlib.lib setupapi.lib cfgmgr32.lib ole32.lib ntdll.lib user32.lib 2>build_err.txt
